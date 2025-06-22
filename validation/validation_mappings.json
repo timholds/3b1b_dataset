@@ -1,0 +1,32 @@
+{
+  "inventing-math": {
+    "video_id": "XFDM1ip5HdU",
+    "url": "https://youtu.be/XFDM1ip5HdU", 
+    "caption_dir": "inventing-math",
+    "year": 2015,
+    "expected_primary_files": ["inventing_math.py"],
+    "expected_supporting_files": ["inventing_math_images.py"],
+    "validation_evidence": [
+      "Code contains DIVERGENT_SUM_TEXT matching transcript's '1 + 2 + 4 + 8 + ... = -1'",
+      "Code contains CONVERGENT_SUM_TEXT matching transcript's '1/2 + 1/4 + 1/8 + ... = 1'", 
+      "Scene classes align with video's mathematical concepts about infinite sums",
+      "Functions like divergent_sum() and convergent_sum() create the mathematical visualizations",
+      "Partial sum calculations and p-adic metric concepts present in code"
+    ],
+    "key_transcript_phrases": [
+      "Take 1 plus 2 plus 4 plus 8 and continue on and on adding the next power of 2 up to infinity",
+      "this infinite sum equals negative 1",
+      "½ plus 1 fourth plus 1 eighth plus 1 sixteenth on and on up to infinity",
+      "equals 1",
+      "2-adic metric",
+      "p-adic metrics"
+    ],
+    "key_code_elements": [
+      "DIVERGENT_SUM_TEXT",
+      "CONVERGENT_SUM_TEXT", 
+      "partial_sum function",
+      "PiCreature animations",
+      "zero_to_one_interval visualization"
+    ]
+  }
+}

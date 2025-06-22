@@ -1,0 +1,10 @@
+{
+  "inventing-math": {
+    "status": "passed",
+    "confidence": 0.98,
+    "primary_files": [
+      "inventing_math.py"
+    ],
+    "evidence_count": 11
+  }
+}
