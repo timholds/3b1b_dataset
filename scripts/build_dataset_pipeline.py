@@ -4,7 +4,10 @@ Orchestration script for building the 3Blue1Brown dataset.
 This script coordinates the entire pipeline:
 1. Match videos to code files
 2. Clean and inline the matched code
-3. Convert from ManimGL to ManimCE (optional)
+3. Convert from ManimGL to ManimCE
+4. Render videos (optional)
+5. Extract training snippets (future - see docs/TRAINING_SNIPPETS_PLAN.md)
+6. Compare with YouTube videos (future)
 """
 
 import json
@@ -24,6 +27,7 @@ from convert_manimgl_to_manimce import ManimConverter
 from render_videos import VideoRenderer
 from manimce_precompile_validator import ManimCEPrecompileValidator
 from conversion_error_collector import collect_conversion_error, get_error_collector
+from generate_comparison_report import ComparisonReportGenerator
 
 class DatasetPipelineBuilder:
     def __init__(self, base_dir: str, verbose: bool = False, timeout_multiplier: float = 1.0, 
@@ -41,11 +45,15 @@ class DatasetPipelineBuilder:
         self.enable_precompile_validation = enable_precompile_validation
         self.auto_fix_precompile = auto_fix_precompile
         
+        # Intelligent hybrid parsing strategy
+        self.intelligent_parsing = True  # Always use smart hybrid approach
+        
         # Initialize components
         self.matcher = ClaudeVideoMatcher(base_dir, verbose)
         self.cleaner = CodeCleaner(base_dir, verbose, timeout_multiplier=timeout_multiplier, max_retries=max_retries)
         self.renderer = VideoRenderer(base_dir, verbose)
         self.validator = ManimCEPrecompileValidator(verbose=verbose)
+        self.comparison_generator = ComparisonReportGenerator(base_dir, verbose)
         # ManimConverter will be initialized when needed with proper paths
         
         # Setup organized logging structure
@@ -56,22 +64,37 @@ class DatasetPipelineBuilder:
         self.archive_dir = self.logs_dir / 'archive'
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configure logger
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = self.logs_dir / f"pipeline_{timestamp}.log"
+        # Configure logger with lazy file creation
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.log_file = self.logs_dir / f"pipeline_{self.timestamp}.log"
+        self.log_file_created = False
         
         # Also create a consolidated log file for the year
         self.consolidated_log_file = self.logs_dir / 'pipeline_history.jsonl'
         
+        # Setup basic logging without file handler initially
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
                 logging.StreamHandler() if verbose else logging.NullHandler()
             ]
         )
         self.logger = logging.getLogger(__name__)
+        self.verbose = verbose
+        
+        # Override logger methods to ensure file creation when needed
+        self._original_info = self.logger.info
+        self._original_warning = self.logger.warning
+        self._original_error = self.logger.error
+        self._original_debug = self.logger.debug
+        self._original_critical = self.logger.critical
+        
+        self.logger.info = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_info, msg, *args, **kwargs)
+        self.logger.warning = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_warning, msg, *args, **kwargs)
+        self.logger.error = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_error, msg, *args, **kwargs)
+        self.logger.debug = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_debug, msg, *args, **kwargs)
+        self.logger.critical = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_critical, msg, *args, **kwargs)
         
         # Pipeline state tracking
         self.pipeline_state = {
@@ -85,6 +108,22 @@ class DatasetPipelineBuilder:
             }
         }
         
+    def _ensure_log_file(self):
+        """Create log file handler only when we actually need to log something."""
+        if not self.log_file_created:
+            # Add file handler to existing logger
+            file_handler = logging.FileHandler(self.log_file)
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self.log_file_created = True
+    
+    def _log_with_file_creation(self, original_method, msg, *args, **kwargs):
+        """Wrapper that ensures log file is created before logging."""
+        self._ensure_log_file()
+        return original_method(msg, *args, **kwargs)
+    
     def save_video_log(self, video_dir: Path, stage: str, log_data: Dict):
         """Save stage-specific log data to the video's logs.json file."""
         log_file = video_dir / 'logs.json'
@@ -260,7 +299,7 @@ class DatasetPipelineBuilder:
         self.logger.info(f"Running code cleaning for year {year}")
         if video_filter:
             self.logger.info(f"Filtering to videos: {video_filter}")
-        summary = self.cleaner.clean_all_matched_videos(year=year, video_filter=video_filter)
+        summary = self.cleaner.clean_all_matched_videos(year=year, video_filter=video_filter, force=force)
         
         # Validate cleaned files
         self.logger.info("Validating syntax of cleaned files...")
@@ -388,7 +427,8 @@ class DatasetPipelineBuilder:
                     verbose=self.verbose,
                     enable_render_validation=getattr(self, 'enable_render_validation', True),
                     render_max_attempts=getattr(self, 'render_max_attempts', 3),
-                    use_advanced_converter=getattr(self, 'use_advanced_converter', True)
+                    use_advanced_converter=getattr(self, 'use_advanced_converter', True),
+                    intelligent_parsing=getattr(self, 'intelligent_parsing', True)
                 )
                 
                 # Convert the file
@@ -864,7 +904,7 @@ def main():
     parser.add_argument('--render-max-attempts', type=int, default=3,
                         help='Maximum attempts to fix render errors per file (default: 3)')
     parser.add_argument('--use-basic-converter', action='store_true',
-                        help='Use basic regex converter instead of advanced AST converter')
+                        help='Use basic regex converter instead of enhanced AST converter (not recommended - lower quality)')
     parser.add_argument('--no-precompile-validation', action='store_true',
                         help='Disable pre-compile validation (faster but may miss errors)')
     parser.add_argument('--precompile-only', action='store_true',

@@ -58,7 +58,7 @@ class ManimConverter:
     
     def __init__(self, source_dir: str, output_dir: str, verbose: bool = False, 
                  enable_render_validation: bool = True, render_max_attempts: int = 3,
-                 use_advanced_converter: bool = True):
+                 use_advanced_converter: bool = True, intelligent_parsing: bool = True):
         self.source_dir = Path(source_dir)
         self.output_dir = Path(output_dir)
         self.conversion_log = []
@@ -68,6 +68,7 @@ class ManimConverter:
         self.enable_render_validation = enable_render_validation
         self.render_max_attempts = render_max_attempts
         self.use_advanced = use_advanced_converter and ADVANCED_CONVERTER_AVAILABLE
+        self.intelligent_parsing = intelligent_parsing
         
         # Initialize advanced converter if available
         if self.use_advanced:
@@ -75,7 +76,9 @@ class ManimConverter:
                 source_dir, output_dir, verbose, 
                 enable_render_validation, render_max_attempts
             )
-            logger.info("Using advanced AST-based converter")
+            # Pass our regex expertise to the AST converter for enhanced quality
+            self.advanced_converter.regex_helper = self
+            logger.info("Using enhanced AST converter with regex techniques")
         else:
             logger.info("Using basic regex-based converter")
         
@@ -320,6 +323,8 @@ class ManimConverter:
         
         return '\n'.join(result_lines)
     
+    # Removed complexity analysis - we now prioritize quality over speed
+    
     def validate_for_conversion(self, file_path: Path) -> Tuple[bool, str]:
         """Check if file is ready for conversion"""
         
@@ -378,6 +383,40 @@ class ManimConverter:
                 content = 'from manim import *\n\n' + content
                 
         return content
+    
+    def fix_tex_parentheses(self, content: str) -> str:
+        """Fix common syntax errors in Tex calls caused by conversion."""
+        import re
+        
+        # Pattern 1: Fix Tex calls with string formatting that have extra )
+        # e.g., Tex(r'\frac{%d}{%d}') % (n, d)) -> Tex(r'\frac{%d}{%d}' % (n, d))
+        content = re.sub(
+            r"((?:Old)?Tex\(r?['\"].*?['\"])\)\s*%\s*([^)]+)\)\)",
+            r"\1 % \2)",
+            content
+        )
+        
+        # Pattern 2: Fix Tex calls ending with '))
+        # e.g., Tex(r'\int')) -> Tex(r'\int')
+        content = re.sub(
+            r"((?:Old)?Tex\(r?['\"][^'\"]+?['\"]\))\)",
+            r"\1",
+            content
+        )
+        
+        # Pattern 3: Fix indentation issues after class definitions
+        lines = content.split('\n')
+        fixed_lines = []
+        
+        for i, line in enumerate(lines):
+            if i > 0 and lines[i-1].strip().startswith('class ') and lines[i-1].strip().endswith(':'):
+                # Previous line was a class definition
+                if line.startswith('def ') and not line.startswith('    '):
+                    # This def should be indented
+                    line = '    ' + line
+            fixed_lines.append(line)
+        
+        return '\n'.join(fixed_lines)
     
     def test_render_scene(self, file_path: Path, scene_name: str, timeout: int = 30) -> Dict:
         """Try to render a scene and return the result."""
@@ -746,6 +785,10 @@ IMPORTANT: Make minimal changes to fix only the render error. Do not refactor or
         
         logger.info(f"Validation passed: {validation_msg}")
         
+        # Quality-first approach: Always use AST but enhance it with regex techniques
+        if self.intelligent_parsing and self.use_advanced:
+            logger.info("Using enhanced AST converter with quality-focused techniques")
+        
         # Use advanced converter if available
         if self.use_advanced:
             try:
@@ -787,6 +830,9 @@ IMPORTANT: Make minimal changes to fix only the render error. Do not refactor or
             converted = apply_all_conversions(converted)
             converted = convert_latex_strings(converted)
             converted = add_scene_config_decorator(converted)
+            
+            # Fix common syntax errors from conversion
+            converted = self.fix_tex_parentheses(converted)
             
             # Add custom animation imports if needed
             if any(anim in converted for anim in ['FlipThroughNumbers', 'DelayByOrder']):
@@ -1166,7 +1212,7 @@ Start by checking files with syntax errors, then move to other pattern fixes.
             f.write(prompt)
         
         try:
-            claude_command = ["claude", "--continue", "--dangerously-skip-permissions", "--model", "opus"]
+            claude_command = ["claude", "--dangerously-skip-permissions", "--model", "opus"]
             if self.verbose:
                 # Run with output streaming
                 logger.info("Running Claude with verbose output...")

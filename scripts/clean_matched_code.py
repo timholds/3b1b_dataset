@@ -26,17 +26,50 @@ class CodeCleaner:
         self.logs_dir = self.output_dir / 'logs' / 'cleaning'
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configure logger
-        log_file = self.logs_dir / f"cleaning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        # Configure logger with lazy file creation
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.log_file = self.logs_dir / f"cleaning_{self.timestamp}.log"
+        self.log_file_created = False
+        
+        # Setup basic logging without file handler initially
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
                 logging.StreamHandler() if verbose else logging.NullHandler()
             ]
         )
         self.logger = logging.getLogger(__name__)
+        self.verbose = verbose
+        
+        # Override logger methods to ensure file creation when needed
+        self._original_info = self.logger.info
+        self._original_warning = self.logger.warning
+        self._original_error = self.logger.error
+        self._original_debug = self.logger.debug
+        self._original_critical = self.logger.critical
+        
+        self.logger.info = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_info, msg, *args, **kwargs)
+        self.logger.warning = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_warning, msg, *args, **kwargs)
+        self.logger.error = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_error, msg, *args, **kwargs)
+        self.logger.debug = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_debug, msg, *args, **kwargs)
+        self.logger.critical = lambda msg, *args, **kwargs: self._log_with_file_creation(self._original_critical, msg, *args, **kwargs)
+        
+    def _ensure_log_file(self):
+        """Create log file handler only when we actually need to log something."""
+        if not self.log_file_created:
+            # Add file handler to existing logger
+            file_handler = logging.FileHandler(self.log_file)
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self.log_file_created = True
+    
+    def _log_with_file_creation(self, original_method, msg, *args, **kwargs):
+        """Wrapper that ensures log file is created before logging."""
+        self._ensure_log_file()
+        return original_method(msg, *args, **kwargs)
         
     def load_match_results(self, year: int) -> Dict[str, Dict]:
         """Load all match results for a given year."""
@@ -52,14 +85,41 @@ class CodeCleaner:
             if video_dir.is_dir():
                 match_file = video_dir / 'matches.json'
                 if match_file.exists():
-                    with open(match_file) as f:
-                        match_data = json.load(f)
-                        results[video_dir.name] = match_data
+                    try:
+                        with open(match_file) as f:
+                            match_data = json.load(f)
+                            results[video_dir.name] = match_data
+                    except json.JSONDecodeError as e:
+                        self.logger.warning(f"Malformed JSON in {match_file}: {e}")
+                        # Try to repair simple cases like trailing shell commands
+                        try:
+                            with open(match_file) as f:
+                                content = f.read()
+                            # Remove lines that look like shell commands after valid JSON
+                            lines = content.split('\n')
+                            json_lines = []
+                            in_json = False
+                            brace_count = 0
+                            for line in lines:
+                                if line.strip().startswith('{'):
+                                    in_json = True
+                                if in_json:
+                                    json_lines.append(line)
+                                    brace_count += line.count('{') - line.count('}')
+                                    if brace_count == 0 and line.strip().endswith('}'):
+                                        break
+                            json_content = '\n'.join(json_lines)
+                            match_data = json.loads(json_content)
+                            results[video_dir.name] = match_data
+                            self.logger.info(f"Successfully repaired JSON in {match_file}")
+                        except Exception as repair_error:
+                            self.logger.error(f"Failed to repair JSON in {match_file}: {repair_error}")
+                            continue
                         
         self.logger.info(f"Loaded {len(results)} match results for year {year}")
         return results
         
-    def should_clean_video(self, match_data: Dict) -> Tuple[bool, str]:
+    def should_clean_video(self, match_data: Dict, force: bool = False) -> Tuple[bool, str]:
         """Determine if a video should be cleaned based on match data."""
         # Check if status indicates a successful match
         status = match_data.get('status', '')
@@ -78,7 +138,8 @@ class CodeCleaner:
             
         # Check if it's already been cleaned
         # This allows re-running without reprocessing
-        if match_data.get('cleaning_status') == 'completed':
+        # Skip this check if force is True
+        if not force and match_data.get('cleaning_status') == 'completed':
             return False, "Already cleaned"
             
         return True, "Ready for cleaning"
@@ -194,7 +255,6 @@ create a file with comments explaining what went wrong."""
                 start_time = time.time()
                 
                 # Run Claude with the cleaning prompt
-                # Use stdin without --continue flag for file operations
                 claude_command =  ["claude", "--dangerously-skip-permissions",  "--model", "opus"]
                 
                 try:
@@ -315,8 +375,8 @@ create a file with comments explaining what went wrong."""
         # Pattern to find strings with backslash continuation
         # More specific pattern that ensures we're actually in a string literal
         # Look for: quote, content, backslash, newline, content, same quote
-        # But make sure it's actually a string (not inside code)
-        pattern = r'(?<![a-zA-Z0-9_])(["\'])([^"\'\\]*(?:\\.[^"\'\\]*)*?)\s*\\\s*\n\s*([^"\'\\]*(?:\\.[^"\'\\]*)*?)\1'
+        # Use positive lookbehind to ensure we're at a string boundary (after =, (, [, {, or space)
+        pattern = r'(?<=[=\(\[\{\s,])(["\'])([^"\'\\]*(?:\\.[^"\'\\]*)*?)\s*\\\s*\n\s*([^"\'\\]*(?:\\.[^"\'\\]*)*?)\1'
         code = re.sub(pattern, fix_string_continuation, code, flags=re.MULTILINE)
         
         # Fix 2: Invalid escape sequences in regular strings
@@ -344,6 +404,16 @@ create a file with comments explaining what went wrong."""
         # Pattern: keyword" "something (e.g., and" "tuple)
         invalid_pattern = r'\b(and|or|not|in|is|if|elif|else|while|for|with|as|from|import|return)\s*"\s*"\s*(\w)'
         code = re.sub(invalid_pattern, r'\1 \2', code)
+        
+        # Fix 5: Fix invalid assignment with quotes
+        # Pattern: = " "Something (extra quotes in assignment)
+        assignment_pattern = r'=\s*"\s*"\s*(\w+)'
+        code = re.sub(assignment_pattern, r'= \1', code)
+        
+        # Fix 6: Fix malformed raw strings
+        # Pattern: Text(""r" -> Text(r"
+        raw_string_pattern = r'(\w+\()""r"'
+        code = re.sub(raw_string_pattern, r'\1r"', code)
         
         # Fix 5: General parenthesis balancing check and fix for common patterns
         lines = code.split('\n')
@@ -468,7 +538,7 @@ create a file with comments explaining what went wrong."""
         with open(checkpoint_file, 'w') as f:
             json.dump(checkpoint_data, f, indent=2)
     
-    def clean_all_matched_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None, resume: bool = True) -> Dict:
+    def clean_all_matched_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None, resume: bool = True, force: bool = False) -> Dict:
         """Clean all successfully matched videos for a given year."""
         # Load match results
         match_results = self.load_match_results(year)
@@ -516,7 +586,7 @@ create a file with comments explaining what went wrong."""
                 continue
             
             # Check if we should clean this video
-            should_clean, reason = self.should_clean_video(match_data)
+            should_clean, reason = self.should_clean_video(match_data, force=force)
             
             if not should_clean:
                 self.logger.info(f"Skipping {caption_dir}: {reason}")
@@ -687,6 +757,8 @@ def main():
                         help='Do not resume from checkpoint, start fresh')
     parser.add_argument('--clear-checkpoint', action='store_true',
                         help='Clear the checkpoint file before starting')
+    parser.add_argument('--force', action='store_true',
+                        help='Force re-cleaning of already cleaned files')
     
     args = parser.parse_args()
     
@@ -698,7 +770,7 @@ def main():
         match_results = cleaner.load_match_results(args.year)
         if args.video in match_results:
             match_data = match_results[args.video]
-            should_clean, reason = cleaner.should_clean_video(match_data)
+            should_clean, reason = cleaner.should_clean_video(match_data, force=args.force)
             
             if should_clean:
                 video_id = match_data.get('video_id', 'unknown')
@@ -720,7 +792,7 @@ def main():
                 print(f"Cleared checkpoint file: {checkpoint_file}")
         
         # Clean all matched videos
-        summary = cleaner.clean_all_matched_videos(year=args.year, resume=not args.no_resume)
+        summary = cleaner.clean_all_matched_videos(year=args.year, resume=not args.no_resume, force=args.force)
         
         print("\nCleaning Summary:")
         print(f"Total matched videos: {summary['stats']['total_matched']}")

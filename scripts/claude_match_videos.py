@@ -158,7 +158,7 @@ Please search thoroughly and provide the most accurate match possible."""
         # Call Claude using subprocess to process the prompt
         try:
             print(f"  🤖 Calling Claude for video: {video_id}")
-            claude_command = ["claude", "--continue", "--dangerously-skip-permissions", "--model", "opus"]
+            claude_command = ["claude", "--dangerously-skip-permissions", "--model", "opus"]
             # Run claude-cli with the prompt
             if self.verbose:
                 # Run with output streaming to console

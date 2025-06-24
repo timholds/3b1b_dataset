@@ -32,6 +32,12 @@ See @excluded_videos.txt for the list of videos that we are excluding from the d
 - ⚠️ **ContinualAnimation**: Automatic updater conversion may need manual tweaking for complex cases
 - ⚠️ **Performance**: AST conversion is slower but more accurate
 - ⚠️ **3D Scenes**: Some advanced 3D features may need additional conversion work
+- ⚠️ **Comparison Framework**: Built but not integrated - waiting for cleaning stage fixes (see docs/COMPARISON_FRAMEWORK.md)
+
+### Next Step: Training Snippet Extraction
+- 🎯 **Scene Dependencies**: Scenes currently share code and cannot run independently
+- 📋 **Plan Ready**: See `docs/TRAINING_SNIPPETS_PLAN.md` for detailed extraction strategy
+- 🔧 **Implementation Needed**: Create `extract_training_snippets.py` to make self-contained scenes
 
 ## 📋 Common Commands
 
@@ -82,6 +88,9 @@ python scripts/build_dataset_pipeline.py --year 2015 --convert-only
 
 # Force re-processing
 python scripts/build_dataset_pipeline.py --year 2015 --force-clean --force-convert
+
+# Extract training snippets (FUTURE - see docs/TRAINING_SNIPPETS_PLAN.md)
+python scripts/build_dataset_pipeline.py --year 2015 --extract-snippets
 ```
 
 ### 🔍 Conversion Stage Options (NEW!)
@@ -156,12 +165,14 @@ python scripts/migrate_logs.py
 
 | Script | Purpose | Key Options |
 |--------|---------|------------|
-| `build_dataset_pipeline.py` | Orchestrates full pipeline | `--year`, `--render`, `--render-preview`, `--force-*`, `--video`, `--timeout-multiplier`, `--max-retries`, `--no-render-validation`, `--render-max-attempts`, `--use-basic-converter`, `--precompile-only`, `--no-precompile-validation`, `--no-auto-fix` |
+| `build_dataset_pipeline.py` | Orchestrates full pipeline | `--year`, `--render`, `--render-preview`, `--force-*`, `--video`, `--timeout-multiplier`, `--max-retries`, `--no-render-validation`, `--render-max-attempts`, `--use-basic-converter`, `--precompile-only`, `--no-precompile-validation`, `--no-auto-fix`, `--extract-snippets` (future) |
 | `clean_matched_code.py` | Cleans and inlines matched code | `--year`, `--video`, `--no-resume`, `--clear-checkpoint`, `--timeout-multiplier`, `--max-retries` |
 | `match_videos_to_code_v4.py` | Matches videos to code files | Used by pipeline |
 | `convert_manimgl_to_manimce.py` | ManimGL→ManimCE conversion with render validation | Used by pipeline |
 | `render_videos.py` | Renders ManimCE code to videos | `--year`, `--video`, `--limit` |
 | `manimce_precompile_validator.py` | Pre-compile validation and automatic fixes | `--path`, `--output`, `--verbose` |
+| `generate_comparison_report.py` | Compare YouTube vs rendered videos (NOT YET INTEGRATED) | `--year`, `--verbose` |
+| `extract_training_snippets.py` | Extract self-contained scene snippets (FUTURE) | `--year`, `--video`, `--approach` |
 
 ## 🏗️ Pipeline Flow
 
@@ -182,6 +193,13 @@ python scripts/migrate_logs.py
    ↓ (saves to outputs/{year}/{video}/manimce_code.py)
 4. RENDERING: render_videos.py (optional)
    ↓ (saves to outputs/{year}/{video}/rendered_videos/)
+5. SNIPPET EXTRACTION: extract_training_snippets.py (FUTURE)
+   ├─ Analyze scene dependencies
+   ├─ Extract self-contained scenes
+   └─ Validate snippet executability
+   ↓ (saves to outputs/{year}/{video}/snippets/)
+6. COMPARISON: generate_comparison_report.py (NOT YET INTEGRATED)
+   ↓ (saves to outputs/comparison_reports/{year}/)
 ```
 
 ## 🔬 Render Validation (NEW!)
@@ -239,6 +257,8 @@ Essential docs (high quality):
 - `docs/manimgl_to_manimce_conversion.md` - Conversion process details
 - `docs/ERROR_COLLECTION_AND_PROMPTING.md` - Error pattern learning system
 - `docs/PRECOMPILE_VALIDATION.md` - Pre-compile validation and automatic fixes
+- `docs/TRAINING_SNIPPETS_PLAN.md` - Plan for extracting self-contained training snippets (NEW)
+- `docs/COMPARISON_FRAMEWORK.md` - YouTube vs rendered video comparison (NOT YET INTEGRATED)
 
 Other docs in `docs/` folder are mixed quality (some from LLM sessions). Treat with skepticism.
 
@@ -256,7 +276,13 @@ Other docs in `docs/` folder are mixed quality (some from LLM sessions). Treat w
     │       ├── cleaned_code.py # Inlined, cleaned ManimGL code
     │       ├── manimce_code.py # Converted ManimCE code
     │       ├── logs.json       # Processing logs for this video
-    │       └── rendered_videos/# Rendered .mp4 files (if rendered)
+    │       ├── rendered_videos/# Rendered .mp4 files (if rendered)
+    │       └── snippets/       # Self-contained scene files (FUTURE)
+    ├── comparison_reports/     # YouTube vs rendered comparisons (FUTURE)
+    │   └── {year}/
+    │       ├── comparison_dashboard.html
+    │       ├── comparison_data.json
+    │       └── comparison_summary.txt
     ├── logs/                   # Pipeline-level logging
     │   ├── archive/           # Old pipeline reports
     │   ├── cleaning/          # Cleaning stage logs
@@ -275,9 +301,10 @@ Other docs in `docs/` folder are mixed quality (some from LLM sessions). Treat w
 
 ## 🎯 Current Priorities
 
-1. **Render Validation Testing**: Test the new render validation on more videos
-2. **Extend to Other Years**: Currently focused on 2015, need 2016-2024
-3. **Performance Optimization**: AST converter is accurate but slower than regex
+1. **Training Snippet Extraction**: Implement self-contained scene extraction for SFT dataset
+2. **Render Validation Testing**: Test the new render validation on more videos
+3. **Extend to Other Years**: Currently focused on 2015, need 2016-2024
+4. **Performance Optimization**: AST converter is accurate but slower than regex
 
 ## 🏃 Quick Wins - Test Everything Works
 

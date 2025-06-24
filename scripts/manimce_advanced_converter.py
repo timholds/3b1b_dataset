@@ -260,7 +260,31 @@ def {func_name}(mobject, dt):
     
     def postprocess_content(self, content: str, analysis: Dict[str, Any], 
                           metadata: Dict[str, Any]) -> str:
-        """Post-process content for final cleanup."""
+        """Post-process content for final cleanup using enhanced regex techniques."""
+        # Apply regex helper's superior techniques if available
+        if hasattr(self, 'regex_helper') and self.regex_helper:
+            logger.info("Applying enhanced regex techniques for superior quality")
+            
+            # Use regex helper's sophisticated Pi Creature handling
+            from pathlib import Path
+            temp_path = Path("temp_conversion")  # Dummy path for the method
+            has_pi_creature = self.regex_helper.detect_pi_creature_usage(content, temp_path)
+            if has_pi_creature:
+                content = self.regex_helper.comment_out_pi_creature_usage(content)
+                metadata['conversions'].append("Applied sophisticated Pi Creature commenting")
+            
+            # Use regex helper's import filtering
+            content = self.regex_helper.convert_imports(content)
+            
+            # Use regex helper's string continuation fixes
+            content = self.regex_helper.fix_string_continuations(content)
+            
+            # Use regex helper's TeX parentheses fixes
+            content = self.regex_helper.fix_tex_parentheses(content)
+            
+            metadata['conversions'].append("Applied enhanced regex post-processing")
+        
+        # Original post-processing logic
         lines = content.split('\n')
         new_lines = []
         
