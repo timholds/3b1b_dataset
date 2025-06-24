@@ -1,0 +1,612 @@
+#!/usr/bin/env python3
+"""
+Comprehensive API mapping database for ManimGL to ManimCE conversion.
+
+This module contains detailed mappings of all API differences between
+ManimGL and ManimCE, including animations, methods, classes, and parameters.
+"""
+
+from typing import Dict, List, Optional, Any, Tuple
+
+# Animation mappings with parameter information
+ANIMATION_MAPPINGS: Dict[str, Dict[str, Any]] = {
+    # Creation animations
+    'ShowCreation': {
+        'new_name': 'Create',
+        'param_mappings': {
+            'run_time': 'run_time',
+            'rate_func': 'rate_func',
+            'lag_ratio': None  # Not supported, needs workaround
+        },
+        'workaround': 'For lag_ratio, use AnimationGroup with delays',
+        'notes': 'Most common animation conversion'
+    },
+    'DrawBorderThenFill': {
+        'new_name': 'DrawBorderThenFill',
+        'param_mappings': {
+            'run_time': 'run_time',
+            'rate_func': 'rate_func',
+            'stroke_width': 'stroke_width',
+            'stroke_color': 'stroke_color'
+        }
+    },
+    'ShowPassingFlash': {
+        'new_name': 'ShowPassingFlash',
+        'param_mappings': {
+            'time_width': 'time_width'
+        }
+    },
+    'ShowCreationThenDestruction': {
+        'new_name': 'ShowPassingFlash',
+        'param_mappings': {},
+        'notes': 'Approximate replacement'
+    },
+    'ShowCreationThenFadeOut': {
+        'new_name': 'Succession',
+        'special_handling': 'Needs to be wrapped: Succession(Create(mob), FadeOut(mob))',
+        'param_mappings': {}
+    },
+    'Uncreate': {
+        'new_name': 'Uncreate',
+        'param_mappings': {
+            'run_time': 'run_time',
+            'rate_func': 'rate_func'
+        }
+    },
+    
+    # Transform animations
+    'ApplyMethod': {
+        'new_name': 'ApplyMethod',
+        'param_mappings': {},
+        'notes': 'Consider using mob.animate syntax instead'
+    },
+    'ApplyPointwiseFunction': {
+        'new_name': 'ApplyPointwiseFunction',
+        'param_mappings': {}
+    },
+    'ApplyMatrix': {
+        'new_name': 'ApplyMatrix',
+        'param_mappings': {}
+    },
+    'WiggleOutThenIn': {
+        'new_name': 'Wiggle',
+        'param_mappings': {
+            'scale_value': 'scale_value',
+            'rotation_angle': 'rotation_angle'
+        }
+    },
+    'CircleIndicate': {
+        'new_name': 'Indicate',
+        'param_mappings': {
+            'scale_factor': 'scale_factor',
+            'color': 'color'
+        }
+    },
+    'Flash': {
+        'new_name': 'Flash',
+        'param_mappings': {
+            'flash_radius': 'flash_radius',
+            'line_length': 'line_length',
+            'num_lines': 'num_lines'
+        }
+    },
+    
+    # Text animations
+    'WriteFrame': {
+        'new_name': 'Create',
+        'param_mappings': {},
+        'notes': 'Frame writing not directly supported'
+    },
+    
+    # Camera animations
+    'MoveCamera': {
+        'new_name': 'MoveCamera',
+        'param_mappings': {
+            'frame_center': 'frame_center',
+            'zoom_factor': 'zoom'
+        },
+        'notes': '3D scene specific'
+    },
+    
+    # Special animations
+    'ContinualAnimation': {
+        'new_name': None,
+        'special_handling': 'Convert to mob.add_updater(lambda m, dt: ...)',
+        'notes': 'Base class for continuous animations'
+    },
+    
+    # Custom 3b1b animations
+    'FlipThroughNumbers': {
+        'new_name': None,
+        'special_handling': 'Create custom implementation using AnimationGroup',
+        'notes': 'Animation that flips through number displays',
+        'param_mappings': {
+            'numbers': 'numbers',
+            'run_time': 'run_time'
+        }
+    },
+    'DelayByOrder': {
+        'new_name': 'LaggedStart',
+        'param_mappings': {
+            'animation': 'animations',  # Need to wrap single animation
+            'lag_ratio': 'lag_ratio'
+        },
+        'special_handling': 'Convert to LaggedStart with submobject animations',
+        'notes': 'Delays animations based on submobject order'
+    }
+}
+
+# Method to property conversions
+METHOD_TO_PROPERTY_MAPPINGS: Dict[str, Dict[str, Any]] = {
+    # Getters
+    'get_width': {
+        'property': 'width',
+        'read_only': True
+    },
+    'get_height': {
+        'property': 'height',
+        'read_only': True
+    },
+    'get_x': {
+        'property': 'x',
+        'read_only': True
+    },
+    'get_y': {
+        'property': 'y',
+        'read_only': True
+    },
+    'get_z': {
+        'property': 'z',
+        'read_only': True
+    },
+    'get_center': {
+        'property': None,
+        'notes': 'Still a method in ManimCE'
+    },
+    'get_tex_string': {
+        'property': 'tex_string',
+        'read_only': True
+    },
+    'get_fill_color': {
+        'property': 'fill_color',
+        'read_only': True
+    },
+    'get_stroke_color': {
+        'property': 'stroke_color',
+        'read_only': True
+    },
+    'get_fill_opacity': {
+        'property': 'fill_opacity',
+        'read_only': True
+    },
+    'get_stroke_opacity': {
+        'property': 'stroke_opacity',
+        'read_only': True
+    },
+    'get_stroke_width': {
+        'property': 'stroke_width',
+        'read_only': True
+    },
+    
+    # Setters
+    'set_width': {
+        'property': 'width',
+        'setter': True,
+        'alternative': 'scale_to_fit_width'
+    },
+    'set_height': {
+        'property': 'height',
+        'setter': True,
+        'alternative': 'scale_to_fit_height'
+    },
+    'set_x': {
+        'method': 'move_to',
+        'special_handling': 'Use move_to([x, old_y, old_z])'
+    },
+    'set_y': {
+        'method': 'move_to',
+        'special_handling': 'Use move_to([old_x, y, old_z])'
+    },
+    'set_z': {
+        'method': 'move_to',
+        'special_handling': 'Use move_to([old_x, old_y, z])'
+    },
+    'set_fill': {
+        'method': 'set_fill',
+        'param_mappings': {
+            'color': 'color',
+            'opacity': 'opacity'
+        }
+    },
+    'set_stroke': {
+        'method': 'set_stroke',
+        'param_mappings': {
+            'color': 'color',
+            'width': 'width',
+            'opacity': 'opacity'
+        }
+    },
+    'set_color': {
+        'method': 'set_color',
+        'param_mappings': {
+            'color': 'color'
+        }
+    }
+}
+
+# Class mappings
+CLASS_MAPPINGS: Dict[str, Dict[str, Any]] = {
+    # Text objects
+    'TextMobject': {
+        'new_class': 'Text',
+        'param_mappings': {
+            'tex_to_color_map': None,  # Needs special handling
+            'arg_separator': None,
+            'alignment': 'alignment'
+        },
+        'special_handling': 'tex_to_color_map → use set_color_by_text()',
+        'notes': 'Major API difference'
+    },
+    'TexMobject': {
+        'new_class': 'MathTex',
+        'param_mappings': {
+            'tex_to_color_map': None,
+            'arg_separator': None
+        },
+        'special_handling': 'Use raw strings for LaTeX'
+    },
+    'TexText': {
+        'new_class': 'Tex',
+        'param_mappings': {},
+        'special_handling': 'Use raw strings for LaTeX'
+    },
+    'OldTex': {
+        'new_class': 'Tex',
+        'param_mappings': {},
+        'notes': 'Convert to raw strings'
+    },
+    'OldTexText': {
+        'new_class': 'Text',
+        'param_mappings': {},
+        'notes': 'Legacy class'
+    },
+    
+    # Base classes
+    'Mobject': {
+        'new_class': 'Mobject',
+        'param_mappings': {},
+        'notes': 'Base class exists in both, but API may differ'
+    },
+    
+    # Shapes
+    'Mobject1D': {
+        'new_class': 'VMobject',
+        'param_mappings': {},
+        'notes': 'No direct equivalent, use VMobject'
+    },
+    'Mobject2D': {
+        'new_class': 'VMobject',
+        'param_mappings': {},
+        'notes': 'No direct equivalent, use VMobject'
+    },
+    
+    # Scenes
+    'GraphScene': {
+        'new_class': 'Scene',
+        'special_handling': 'Need to manually add Axes and coordinate methods',
+        'required_imports': ['Axes', 'Create'],
+        'notes': 'Complex conversion needed'
+    },
+    'NumberLineScene': {
+        'new_class': 'Scene',
+        'special_handling': 'Need to manually add NumberLine',
+        'required_imports': ['NumberLine'],
+        'notes': 'Requires setup method'
+    },
+    'RearrangeEquation': {
+        'new_class': 'Scene',
+        'special_handling': 'Custom implementation provided in stubs',
+        'required_imports': ['MathTex', 'Write', 'Transform', 'TransformMatchingTex', 'FadeIn', 'FadeOut'],
+        'notes': 'Static method pattern needs special handling'
+    },
+    'ThreeDScene': {
+        'new_class': 'ThreeDScene',
+        'param_mappings': {},
+        'config_updates': {
+            'renderer': 'opengl'  # May need this for interactive 3D
+        }
+    },
+    'SpecialThreeDScene': {
+        'new_class': 'ThreeDScene',
+        'param_mappings': {},
+        'notes': 'Custom 3b1b class'
+    },
+    
+    # Animation base classes
+    'ContinualAnimation': {
+        'new_class': None,
+        'special_handling': 'Convert to updater functions',
+        'notes': 'Fundamental API difference'
+    },
+    
+    # Groups
+    'VectorizedPoint': {
+        'new_class': 'VectorizedPoint',
+        'param_mappings': {}
+    },
+    
+    # Special objects
+    'PiCreature': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Proprietary 3b1b asset'
+    },
+    'Randolph': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Proprietary 3b1b asset'
+    },
+    'Mortimer': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Proprietary 3b1b asset'
+    }
+}
+
+# Color mappings
+COLOR_MAPPINGS: Dict[str, str] = {
+    'COLOR_MAP': 'MANIM_COLORS',
+    'LIGHT_GRAY': 'LIGHT_GREY',
+    'DARK_GRAY': 'DARK_GREY',
+    'GRAY': 'GREY',
+    'GRAY_A': 'GREY_A',
+    'GRAY_B': 'GREY_B',
+    'GRAY_C': 'GREY_C',
+    'GRAY_D': 'GREY_D',
+    'GRAY_E': 'GREY_E',
+    # Extended color variants from ManimGL
+    # Map to closest ManimCE equivalents or use interpolated colors
+    'BLUE_A': 'PURE_BLUE',  # Lightest blue
+    'BLUE_B': 'BLUE',       # Light blue
+    'BLUE_C': 'BLUE',       # Standard blue (default)
+    'BLUE_D': 'DARK_BLUE',  # Dark blue
+    'BLUE_E': 'DARKER_BLUE', # Darkest blue
+    'GREEN_A': 'LIGHT_GREEN',
+    'GREEN_B': 'GREEN',
+    'GREEN_C': 'GREEN',      # Standard green (default)
+    'GREEN_D': 'DARK_GREEN',
+    'GREEN_E': 'DARK_GREEN', # No darker variant, use same
+    'RED_A': 'LIGHT_RED',
+    'RED_B': 'RED',
+    'RED_C': 'RED',          # Standard red (default)
+    'RED_D': 'DARK_RED',
+    'RED_E': 'MAROON',       # Darkest red
+    'YELLOW_A': 'LIGHT_YELLOW',
+    'YELLOW_B': 'YELLOW',
+    'YELLOW_C': 'YELLOW',    # Standard yellow (default)
+    'YELLOW_D': 'GOLD',      # Darker yellow
+    'YELLOW_E': 'GOLD_E',    # Darkest yellow
+    'PINK_A': 'LIGHT_PINK',
+    'PINK_B': 'PINK',
+    'PINK_C': 'PINK',        # Standard pink (default)
+    'PINK_D': 'LIGHT_MAROON',
+    'PINK_E': 'MAROON',
+    'TEAL_A': 'LIGHT_BLUE',  # No direct teal variants
+    'TEAL_B': 'TEAL',
+    'TEAL_C': 'TEAL',        # Standard teal (default)
+    'TEAL_D': 'DARK_BLUE',   # Approximate with dark blue
+    'TEAL_E': 'DARKER_BLUE', # Approximate with darker blue
+    'PURPLE_A': 'LIGHT_PURPLE',
+    'PURPLE_B': 'PURPLE',
+    'PURPLE_C': 'PURPLE',    # Standard purple (default)
+    'PURPLE_D': 'DARK_PURPLE',
+    'PURPLE_E': 'DARK_PURPLE', # No darker variant
+    'MAROON_A': 'LIGHT_MAROON',
+    'MAROON_B': 'MAROON',
+    'MAROON_C': 'MAROON',    # Standard maroon (default)
+    'MAROON_D': 'DARK_MAROON',
+    'MAROON_E': 'DARK_MAROON', # No darker variant
+    'ORANGE_A': 'LIGHT_ORANGE',
+    'ORANGE_B': 'ORANGE', 
+    'ORANGE_C': 'ORANGE',    # Standard orange (default)
+    'ORANGE_D': 'DARK_ORANGE',
+    'ORANGE_E': 'DARK_ORANGE', # No darker variant
+}
+
+# Constant mappings
+CONSTANT_MAPPINGS: Dict[str, Dict[str, Any]] = {
+    'FRAME_HEIGHT': {
+        'new_value': 'config.frame_height',
+        'type': 'config_attr'
+    },
+    'FRAME_WIDTH': {
+        'new_value': 'config.frame_width',
+        'type': 'config_attr'
+    },
+    'FRAME_X_RADIUS': {
+        'new_value': 'config.frame_width / 2',
+        'type': 'expression'
+    },
+    'FRAME_Y_RADIUS': {
+        'new_value': 'config.frame_height / 2',
+        'type': 'expression'
+    },
+    'PIXEL_HEIGHT': {
+        'new_value': 'config.pixel_height',
+        'type': 'config_attr'
+    },
+    'PIXEL_WIDTH': {
+        'new_value': 'config.pixel_width',
+        'type': 'config_attr'
+    },
+    'DEFAULT_MOBJECT_TO_EDGE_BUFFER': {
+        'new_value': 'MED_SMALL_BUFF',
+        'type': 'constant'
+    },
+    'DEFAULT_MOBJECT_TO_MOBJECT_BUFFER': {
+        'new_value': 'MED_SMALL_BUFF',
+        'type': 'constant'
+    },
+    'VIDEO_DIR': {
+        'new_value': '"./"',
+        'type': 'string',
+        'notes': 'Default to current directory'
+    }
+}
+
+# Direction constant mappings (corner shortcuts)
+DIRECTION_MAPPINGS: Dict[str, str] = {
+    'DOWN+LEFT': 'DL',
+    'DOWN+RIGHT': 'DR',
+    'UP+LEFT': 'UL',
+    'UP+RIGHT': 'UR',
+    'LEFT+DOWN': 'DL',
+    'RIGHT+DOWN': 'DR',
+    'LEFT+UP': 'UL',
+    'RIGHT+UP': 'UR',
+}
+
+# Complex conversion patterns that need special handling
+COMPLEX_PATTERNS: Dict[str, Dict[str, Any]] = {
+    'tex_to_color_map': {
+        'pattern': r'tex_to_color_map\s*=\s*{([^}]+)}',
+        'handler': 'convert_tex_to_color_map',
+        'description': 'Convert to set_color_by_text() calls'
+    },
+    'CONFIG_dict': {
+        'pattern': r'CONFIG\s*=\s*{',
+        'handler': 'convert_config_dict',
+        'description': 'Convert to class attributes'
+    },
+    'coordinate_labels': {
+        'pattern': r'get_graph_label|get_axis_label',
+        'handler': 'convert_graph_labels',
+        'description': 'Update to new Axes API'
+    },
+    'updater_functions': {
+        'pattern': r'def update_.*\(.*,\s*dt\)',
+        'handler': 'identify_updater_pattern',
+        'description': 'Identify updater function patterns'
+    },
+    'camera_orientation': {
+        'pattern': r'set_camera_orientation\(',
+        'handler': 'update_camera_calls',
+        'description': '3D camera API updates'
+    }
+}
+
+# Scene-specific conversion templates
+SCENE_TEMPLATES: Dict[str, str] = {
+    'GraphScene': '''
+    def setup_axes(self, animate=False):
+        """Create and add axes to the scene."""
+        self.axes = Axes(
+            x_range=[self.x_min, self.x_max, self.x_axis_step],
+            y_range=[self.y_min, self.y_max, self.y_axis_step],
+            axis_config=self.axis_config,
+        )
+        
+        if self.include_tip:
+            self.axes.add_tip()
+            
+        if animate:
+            self.play(Create(self.axes))
+        else:
+            self.add(self.axes)
+            
+        return self.axes
+    
+    def coords_to_point(self, x, y):
+        """Convert graph coordinates to scene point."""
+        if hasattr(self, 'axes'):
+            return self.axes.c2p(x, y)
+        return np.array([x, y, 0])
+    
+    def point_to_coords(self, point):
+        """Convert scene point to graph coordinates."""
+        if hasattr(self, 'axes'):
+            return self.axes.p2c(point)
+        return point[:2]
+    
+    def get_graph(self, func, **kwargs):
+        """Create a graph of the given function."""
+        if hasattr(self, 'axes'):
+            return self.axes.plot(func, **kwargs)
+        raise Exception("Must call setup_axes first")
+''',
+    
+    'NumberLineScene': '''
+    def setup(self):
+        """Create and add number line to the scene."""
+        self.number_line = NumberLine(
+            x_range=[-10, 10, 1],
+            length=FRAME_WIDTH - 1,
+            include_numbers=True,
+        )
+        self.add(self.number_line)
+    
+    def number_to_point(self, number):
+        """Convert number to point on the number line."""
+        return self.number_line.n2p(number)
+    
+    def point_to_number(self, point):
+        """Convert point to number on the number line."""
+        return self.number_line.p2n(point)
+'''
+}
+
+def get_animation_conversion(animation_name: str) -> Optional[Dict[str, Any]]:
+    """Get conversion info for a specific animation."""
+    return ANIMATION_MAPPINGS.get(animation_name)
+
+def get_method_conversion(method_name: str) -> Optional[Dict[str, Any]]:
+    """Get conversion info for a specific method."""
+    return METHOD_TO_PROPERTY_MAPPINGS.get(method_name)
+
+def get_class_conversion(class_name: str) -> Optional[Dict[str, Any]]:
+    """Get conversion info for a specific class."""
+    return CLASS_MAPPINGS.get(class_name)
+
+def get_color_mapping(color_name: str) -> Optional[str]:
+    """Get ManimCE equivalent for a ManimGL color."""
+    return COLOR_MAPPINGS.get(color_name, color_name)
+
+def get_constant_mapping(constant_name: str) -> Optional[Dict[str, Any]]:
+    """Get ManimCE equivalent for a ManimGL constant."""
+    return CONSTANT_MAPPINGS.get(constant_name)
+
+def get_required_imports_for_class(class_name: str) -> List[str]:
+    """Get additional imports required for a converted class."""
+    class_info = CLASS_MAPPINGS.get(class_name, {})
+    return class_info.get('required_imports', [])
+
+def get_all_manimce_imports() -> List[str]:
+    """Get comprehensive list of ManimCE imports that might be needed."""
+    return [
+        # Core
+        'Scene', 'ThreeDScene',
+        # Mobjects
+        'Mobject', 'VMobject', 'Group', 'VGroup',
+        # Text
+        'Text', 'MathTex', 'Tex', 'Code',
+        # Shapes
+        'Circle', 'Square', 'Rectangle', 'Line', 'Arrow', 'Dot',
+        'Polygon', 'RegularPolygon', 'Triangle',
+        # Animations
+        'Animation', 'Create', 'Write', 'FadeIn', 'FadeOut',
+        'Transform', 'ReplacementTransform', 'MoveToTarget',
+        'Indicate', 'Flash', 'Wiggle', 'ShowPassingFlash',
+        'DrawBorderThenFill', 'Uncreate',
+        # Animation groups
+        'AnimationGroup', 'Succession', 'LaggedStart',
+        # Graphs
+        'Axes', 'NumberLine', 'NumberPlane',
+        # Constants
+        'UP', 'DOWN', 'LEFT', 'RIGHT', 'ORIGIN',
+        'UL', 'UR', 'DL', 'DR',
+        'RED', 'BLUE', 'GREEN', 'YELLOW', 'WHITE', 'BLACK',
+        'GREY', 'GREY_A', 'GREY_B', 'GREY_C',
+        'PI', 'TAU', 'DEGREES',
+        # Utilities
+        'config', 'rate_functions',
+    ]

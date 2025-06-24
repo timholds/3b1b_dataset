@@ -15,15 +15,15 @@ class ClaudeVideoMatcher:
     def __init__(self, base_dir: str, verbose: bool = False):
         self.base_dir = Path(base_dir)
         self.data_dir = self.base_dir / 'data'
-        self.output_dir = self.base_dir / 'output'
+        self.output_dir = self.base_dir / 'outputs'
         self.claude_results_dir = self.output_dir / 'claude_matches'
         self.claude_results_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
         self.excluded_videos = self.load_excluded_videos()
         
-    def load_video_mappings(self) -> Dict:
+    def load_video_mappings(self, year: int) -> Dict:
         """Load the video mappings from extract_video_urls.py output."""
-        mappings_file = self.data_dir / 'youtube_metadata' / '2015_video_mappings.json'
+        mappings_file = self.data_dir / 'youtube_metadata' / f'{year}_video_mappings.json'
         if not mappings_file.exists():
             raise FileNotFoundError(f"Run extract_video_urls.py first: {mappings_file}")
         
@@ -89,7 +89,7 @@ class ClaudeVideoMatcher:
         """Create a prompt for Claude to find matching code files."""
         
         # Make output path absolute to avoid confusion
-        output_path = self.output_dir / "v5" / str(year) / video_info['caption_dir'] / "matches.json"
+        output_path = self.output_dir / str(year) / video_info['caption_dir'] / "matches.json"
         output_path_str = str(output_path)
         
         return f"""You are helping match 3Blue1Brown videos to their Manim source code.
@@ -158,45 +158,49 @@ Please search thoroughly and provide the most accurate match possible."""
         # Call Claude using subprocess to process the prompt
         try:
             print(f"  🤖 Calling Claude for video: {video_id}")
-            
+            claude_command = ["claude", "--continue", "--dangerously-skip-permissions", "--model", "opus"]
             # Run claude-cli with the prompt
             if self.verbose:
                 # Run with output streaming to console
                 process = subprocess.Popen(
-                    ["claude", "--continue", "--dangerously-skip-permissions", "--model", "sonnet", "-p", prompt],
+                    claude_command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    bufsize=1  # Line buffered
                 )
+                
+                # Send the prompt to stdin
+                process.stdin.write(prompt)
+                process.stdin.close()
                 
                 # Collect output while also printing it
                 stdout_lines = []
-                stderr_lines = []
                 
                 # Read stdout in real-time
-                for line in iter(process.stdout.readline, ''):
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
                     if line:
                         print(f"    Claude: {line.rstrip()}")
                         stdout_lines.append(line)
                 
-                # Wait for process to complete
-                process.wait()
-                
                 # Get any remaining stderr
                 stderr = process.stderr.read()
-                if stderr:
-                    stderr_lines.append(stderr)
                 
                 result = subprocess.CompletedProcess(
                     args=process.args,
                     returncode=process.returncode,
                     stdout=''.join(stdout_lines),
-                    stderr=''.join(stderr_lines)
+                    stderr=stderr
                 )
             else:
                 # Original behavior - capture output silently
                 result = subprocess.run(
-                    ["claude", "--continue", "--dangerously-skip-permissions", "--model", "sonnet", "-p", prompt],
+                    claude_command,
+                    input=prompt,
                     capture_output=True,
                     text=True,
                     timeout=300  # 5 minute timeout
@@ -265,7 +269,7 @@ Please search thoroughly and provide the most accurate match possible."""
 
     def match_all_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None):
         """Run Claude matching for all videos in a given year."""
-        video_mappings = self.load_video_mappings()
+        video_mappings = self.load_video_mappings(year)
         results = {}
         
         # Apply video filter if specified
@@ -314,7 +318,7 @@ Please search thoroughly and provide the most accurate match possible."""
 
                 if result['status'] == 'completed':
                     # Read the JSON file Claude created
-                    match_file_path = self.output_dir / f"v5/{year}/{video_info['caption_dir']}/matches.json"
+                    match_file_path = self.output_dir / str(year) / video_info['caption_dir'] / "matches.json"
                     
                     if match_file_path.exists():
                         with open(match_file_path) as f:
@@ -330,6 +334,32 @@ Please search thoroughly and provide the most accurate match possible."""
                             results[caption_dir]['status'] = 'low_confidence'
                         else:
                             print(f"  ✓ High confidence match ({confidence})")
+                            
+                        # Save match log to video's logs.json
+                        video_dir = self.output_dir / str(year) / video_info['caption_dir']
+                        log_file = video_dir / 'logs.json'
+                        
+                        # Load existing logs if file exists
+                        if log_file.exists():
+                            with open(log_file) as f:
+                                logs = json.load(f)
+                        else:
+                            logs = {}
+                        
+                        # Add matching log
+                        logs['matching'] = {
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'data': {
+                                'status': result['status'],
+                                'confidence_score': confidence,
+                                'primary_files': match_data.get('primary_files', []),
+                                'related_files': match_data.get('related_files', [])
+                            }
+                        }
+                        
+                        # Save updated logs
+                        with open(log_file, 'w') as f:
+                            json.dump(logs, f, indent=2)
                     else:
                         print(f"  ❌ Match file not created by Claude at {match_file_path}")
                         results[caption_dir]['status'] = 'no_match_file'
@@ -402,8 +432,8 @@ def main():
     summary = matcher.save_final_results(results, args.year)
     
     print("\nNext steps:")
-    print("1. Review any errors in output/claude_matches/*_error.txt")
-    print(f"2. Check low confidence matches in output/v5/{args.year}/*/matches.json")
+    print("1. Review any errors in outputs/claude_matches/*_error.txt")
+    print(f"2. Check low confidence matches in outputs/{args.year}/*/matches.json")
     print(f"3. Run the cleaning script: python scripts/clean_matched_code.py --year {args.year}")
     print(f"4. Run the full pipeline: python scripts/build_dataset_pipeline.py --year {args.year}")
     print(f"\nStats:")

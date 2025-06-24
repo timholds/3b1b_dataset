@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 class VideoRenderer:
     def __init__(self, base_dir: str, verbose: bool = False):
         self.base_dir = Path(base_dir)
-        self.output_base_dir = self.base_dir / 'output' / 'rendered_videos'
+        self.output_base_dir = self.base_dir / 'outputs'
         self.verbose = verbose
         
         # Setup logging
@@ -29,15 +29,16 @@ class VideoRenderer:
             self.logger.setLevel(logging.INFO)
             
         # Rendering configurations
+        # ManimCE quality options: l (low), m (medium), h (high), p (production), k (4k)
         self.quality_configs = {
             'preview': {
-                'quality': 'low_quality',
+                'quality': 'l',  # low quality for fast preview
                 'resolution': '854,480',  # 480p
                 'fps': 30,
                 'format': 'mp4'
             },
             'production': {
-                'quality': 'high_quality', 
+                'quality': 'h',  # high quality
                 'resolution': '1920,1080',  # 1080p
                 'fps': 60,
                 'format': 'mp4'
@@ -83,24 +84,39 @@ class VideoRenderer:
         
         try:
             with open(code_file) as f:
-                tree = ast.parse(f.read())
+                content = f.read()
                 
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    # Check if this class inherits from Scene
-                    for base in node.bases:
-                        base_name = ""
-                        if isinstance(base, ast.Name):
-                            base_name = base.id
-                        elif isinstance(base, ast.Attribute):
-                            base_name = base.attr
-                            
-                        if 'Scene' in base_name:
-                            scene_classes.append(node.name)
-                            break
+            # First try AST parsing
+            try:
+                tree = ast.parse(content)
+                
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        # Check if this class inherits from Scene
+                        for base in node.bases:
+                            base_name = ""
+                            if isinstance(base, ast.Name):
+                                base_name = base.id
+                            elif isinstance(base, ast.Attribute):
+                                base_name = base.attr
+                                
+                            if 'Scene' in base_name:
+                                scene_classes.append(node.name)
+                                break
+            except SyntaxError as e:
+                # Fallback to regex parsing if AST fails
+                self.logger.warning(f"AST parsing failed for {code_file}, using regex fallback: {e}")
+                
+                # Find class definitions that inherit from Scene
+                class_pattern = r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)\s*:'
+                matches = re.findall(class_pattern, content, re.MULTILINE)
+                scene_classes = list(set(matches))  # Remove duplicates
+                
+                if scene_classes:
+                    self.logger.info(f"Found {len(scene_classes)} scenes using regex: {scene_classes}")
                             
         except Exception as e:
-            self.logger.error(f"Error parsing {code_file}: {e}")
+            self.logger.error(f"Error reading {code_file}: {e}")
             
         return scene_classes
         
@@ -217,7 +233,8 @@ class VideoRenderer:
         self.logger.info(f"Found {len(scenes)} scenes to render in {video_id}")
         
         # Create output directory
-        output_dir = self.output_base_dir / str(year) / video_id
+        # Save rendered videos in a subdirectory within the video's main directory
+        output_dir = self.output_base_dir / str(year) / video_id / 'rendered_videos'
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Render each scene
@@ -266,6 +283,27 @@ class VideoRenderer:
                 'results': results
             }, f, indent=2)
             
+        # Also save to the video's main logs.json file
+        video_dir = self.output_base_dir / str(year) / video_id
+        log_file = video_dir / 'logs.json'
+        
+        # Load existing logs if file exists
+        if log_file.exists():
+            with open(log_file) as f:
+                logs = json.load(f)
+        else:
+            logs = {}
+        
+        # Add rendering log
+        logs['rendering'] = {
+            'timestamp': datetime.now().isoformat(),
+            'data': results
+        }
+        
+        # Save updated logs
+        with open(log_file, 'w') as f:
+            json.dump(logs, f, indent=2)
+            
         return results
         
     def generate_thumbnail(self, video_file: Path, timestamp: float = 2.0) -> Optional[Path]:
@@ -301,7 +339,7 @@ class VideoRenderer:
             self.logger.info(f"Filtering to videos: {video_filter}")
         
         # Find all videos with cleaned or converted code
-        year_output_dir = self.base_dir / 'output' / 'v5' / str(year)
+        year_output_dir = self.base_dir / 'outputs' / str(year)
         
         if not year_output_dir.exists():
             self.logger.error(f"No output directory found for year {year}")
@@ -435,7 +473,7 @@ def main():
     
     if args.video:
         # Render single video
-        year_output_dir = base_dir / 'output' / 'v5' / str(args.year) / args.video
+        year_output_dir = base_dir / 'outputs' / str(args.year) / args.video
         
         if not year_output_dir.exists():
             print(f"Video directory not found: {year_output_dir}")

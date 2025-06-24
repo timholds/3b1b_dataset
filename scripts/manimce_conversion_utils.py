@@ -321,22 +321,134 @@ def add_undefined_class_stubs(content: str) -> str:
     undefined_classes = {
         'Mobject1D': 'class Mobject1D(VMobject):\n    pass\n',
         'Mobject2D': 'class Mobject2D(VMobject):\n    pass\n',
-        'GraphScene': '''class GraphScene(Scene):
-    """Basic GraphScene compatibility stub."""
+        'RearrangeEquation': '''from manim import TexTemplate  # Required for size formatting
+
+class RearrangeEquation(Scene):
+    """Enhanced RearrangeEquation compatibility implementation."""
+    @staticmethod
+    def construct(scene, start_terms, end_terms, index_map, 
+                  size="\\\\large", path=None, start_transform=None,
+                  end_transform=None, leave_start_terms=False,
+                  transform_kwargs=None):
+        """Enhanced implementation for equation rearrangement with term mapping."""
+        if transform_kwargs is None:
+            transform_kwargs = {}
+        
+        # Create the starting equation with size
+        if size:
+            start_eq = MathTex(*start_terms, tex_template=TexTemplate().add_to_preamble(f"\\\\{size}"))
+        else:
+            start_eq = MathTex(*start_terms)
+            
+        if start_transform:
+            start_eq = start_transform(start_eq)
+        
+        # Create the ending equation with size
+        if size:
+            end_eq = MathTex(*end_terms, tex_template=TexTemplate().add_to_preamble(f"\\\\{size}"))
+        else:
+            end_eq = MathTex(*end_terms)
+            
+        if end_transform:
+            end_eq = end_transform(end_eq)
+        
+        # Show the starting equation
+        scene.play(Write(start_eq))
+        scene.wait()
+        
+        # Handle the rearrangement with index mapping
+        if index_map:
+            # Create a list to hold the transforms
+            transforms = []
+            
+            # For each mapping, create a transform from start to end position
+            for start_idx, end_idx in index_map.items():
+                if start_idx < len(start_eq) and end_idx < len(end_eq):
+                    # Use TransformMatchingTex for better alignment
+                    transforms.append(
+                        TransformMatchingTex(
+                            start_eq[start_idx].copy(),
+                            end_eq[end_idx],
+                            path_arc=path if path else 0,
+                            **transform_kwargs
+                        )
+                    )
+            
+            # Also fade out terms that aren't mapped
+            fade_out_terms = []
+            for i, term in enumerate(start_eq):
+                if i not in index_map:
+                    fade_out_terms.append(FadeOut(term))
+            
+            # Fade in new terms that weren't in the original
+            fade_in_terms = []
+            mapped_end_indices = set(index_map.values())
+            for i, term in enumerate(end_eq):
+                if i not in mapped_end_indices:
+                    fade_in_terms.append(FadeIn(term))
+            
+            # Play all animations together
+            all_anims = transforms + fade_out_terms + fade_in_terms
+            if all_anims:
+                scene.play(*all_anims, **transform_kwargs)
+            else:
+                # Fallback to simple transform
+                scene.play(Transform(start_eq, end_eq, **transform_kwargs))
+        else:
+            # No index map provided, use simple transform
+            scene.play(Transform(start_eq, end_eq, path_arc=path if path else 0, **transform_kwargs))
+        
+        scene.wait()
+        
+        if not leave_start_terms:
+            scene.clear()
+        else:
+            # Keep the end equation visible
+            scene.add(end_eq)
+''',
+        'GraphScene': '''import numpy as np  # Required for GraphScene
+
+class GraphScene(Scene):
+    """Enhanced GraphScene compatibility implementation."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.x_min = -1
-        self.x_max = 10
-        self.y_min = -1
-        self.y_max = 10
+        # Default graph parameters
+        self.x_min = kwargs.get('x_min', -1)
+        self.x_max = kwargs.get('x_max', 10)
+        self.y_min = kwargs.get('y_min', -1)
+        self.y_max = kwargs.get('y_max', 10)
+        self.x_axis_step = kwargs.get('x_axis_step', 1)
+        self.y_axis_step = kwargs.get('y_axis_step', 1)
+        self.x_axis_label = kwargs.get('x_axis_label', None)
+        self.y_axis_label = kwargs.get('y_axis_label', None)
+        self.include_tip = kwargs.get('include_tip', True)
+        self.axis_config = kwargs.get('axis_config', {})
+        self.graph_origin = kwargs.get('graph_origin', ORIGIN)
+        self.axes_color = kwargs.get('axes_color', WHITE)
         self.axes = None
         
     def setup_axes(self, animate=False):
         """Create and add axes to the scene."""
         self.axes = Axes(
-            x_range=[self.x_min, self.x_max, 1],
-            y_range=[self.y_min, self.y_max, 1],
-        )
+            x_range=[self.x_min, self.x_max, self.x_axis_step],
+            y_range=[self.y_min, self.y_max, self.y_axis_step],
+            axis_config={
+                "color": self.axes_color,
+                **self.axis_config
+            },
+        ).shift(self.graph_origin)
+        
+        # Add labels if specified
+        if self.x_axis_label:
+            x_label = Text(self.x_axis_label).next_to(self.axes.x_axis, DOWN)
+            self.axes.add(x_label)
+        if self.y_axis_label:
+            y_label = Text(self.y_axis_label).next_to(self.axes.y_axis, LEFT)
+            self.axes.add(y_label)
+            
+        if self.include_tip:
+            self.axes.add_tips()
+            
         if animate:
             self.play(Create(self.axes))
         else:
@@ -347,7 +459,51 @@ def add_undefined_class_stubs(content: str) -> str:
         """Convert graph coordinates to point."""
         if self.axes:
             return self.axes.c2p(x, y)
-        return ORIGIN
+        return np.array([x, y, 0]) + self.graph_origin
+        
+    def point_to_coords(self, point):
+        """Convert point to graph coordinates."""
+        if self.axes:
+            return self.axes.p2c(point)
+        return (point - self.graph_origin)[:2]
+    
+    def get_graph(self, func, x_range=None, **kwargs):
+        """Create a graph of the given function."""
+        if not self.axes:
+            self.setup_axes()
+        if x_range is None:
+            x_range = [self.x_min, self.x_max]
+        return self.axes.plot(func, x_range=x_range, **kwargs)
+    
+    def get_derivative_graph(self, graph, **kwargs):
+        """Create a derivative graph from an existing graph."""
+        # Simple numerical derivative
+        def derivative_func(x):
+            dx = 0.001
+            return (graph.underlying_function(x + dx) - graph.underlying_function(x - dx)) / (2 * dx)
+        return self.get_graph(derivative_func, **kwargs)
+    
+    def get_graph_label(self, graph, label, x_val=None, direction=UP, **kwargs):
+        """Add a label to a graph."""
+        if x_val is None:
+            x_val = (self.x_min + self.x_max) / 2
+        label_mob = MathTex(label, **kwargs) if isinstance(label, str) else label
+        point = self.axes.input_to_graph_point(x_val, graph)
+        label_mob.next_to(point, direction)
+        return label_mob
+    
+    def get_axis_labels(self, x_label=None, y_label=None):
+        """Get axis labels."""
+        labels = VGroup()
+        if x_label:
+            x_label_mob = MathTex(x_label) if isinstance(x_label, str) else x_label
+            x_label_mob.next_to(self.axes.x_axis, DOWN)
+            labels.add(x_label_mob)
+        if y_label:
+            y_label_mob = MathTex(y_label) if isinstance(y_label, str) else y_label
+            y_label_mob.next_to(self.axes.y_axis, LEFT)
+            labels.add(y_label_mob)
+        return labels
 ''',
         'NumberLineScene': '''class NumberLineScene(Scene):
     """Basic NumberLineScene compatibility stub."""
@@ -393,17 +549,227 @@ def add_undefined_class_stubs(content: str) -> str:
     return content
 
 
+def fix_string_continuations(content: str) -> str:
+    """Fix backslash continuations in string literals."""
+    # Pattern to find strings with backslash continuation
+    # This matches strings that have a backslash followed by a newline
+    pattern = r'(["\'])([^"\']*?)\\(\s*\n\s*)([^"\']*?)\1'
+    
+    def replace_continuation(match):
+        quote = match.group(1)
+        part1 = match.group(2)
+        part2 = match.group(4)
+        # Convert to implicit string concatenation
+        return f'{quote}{part1}{quote} {quote}{part2}{quote}'
+    
+    # Apply the fix
+    fixed = re.sub(pattern, replace_continuation, content, flags=re.MULTILINE | re.DOTALL)
+    
+    # Also handle triple-quoted strings with continuations
+    triple_pattern = r'("""|\'\'\')([^"\']*?)\\(\s*\n\s*)([^"\']*?)\1'
+    fixed = re.sub(triple_pattern, replace_continuation, fixed, flags=re.MULTILINE | re.DOTALL)
+    
+    return fixed
+
+
+def convert_manimgl_imports(content: str) -> str:
+    """Convert ManimGL imports to ManimCE imports."""
+    # Replace manimlib imports with manim
+    content = re.sub(r'from manimlib import \*', 'from manim import *', content)
+    content = re.sub(r'from manimlib\.', 'from manim.', content)
+    content = re.sub(r'import manimlib', 'import manim', content)
+    
+    # Replace manim_imports_ext
+    content = re.sub(r'from manim_imports_ext import \*', 'from manim import *', content)
+    
+    # Remove custom imports that don't exist in ManimCE
+    custom_imports = [
+        r'from custom\..*',
+        r'from once_useful_constructs.*',
+        r'from script_wrapper import.*',
+        r'from stage_scenes import.*',
+    ]
+    
+    for pattern in custom_imports:
+        content = re.sub(pattern + r'\n?', '', content)
+    
+    return content
+
+
+def fix_common_import_errors(content: str):
+    """Fix common import errors based on error patterns."""
+    # Add missing essential imports if not present
+    if 'from manim import' not in content and 'import manim' not in content:
+        # Find first import or start of file
+        lines = content.split('\n')
+        insert_pos = 0
+        for i, line in enumerate(lines):
+            if line.strip() and (line.startswith('import') or line.startswith('from')):
+                insert_pos = i
+                break
+        
+        # Add comprehensive imports
+        lines.insert(insert_pos, 'from manim import *')
+        content = '\n'.join(lines)
+    
+    # Fix specific missing imports based on usage
+    import_fixes = {
+        r'\bShowCreation\b': 'from manim import Create',
+        r'\bTextMobject\b': 'from manim import Text',
+        r'\bTexMobject\b': 'from manim import MathTex',
+        r'\bDrawBorderThenFill\b': 'from manim import DrawBorderThenFill',
+        r'\bFadeInFromDown\b': 'from manim import FadeIn',
+        r'\bFadeOutAndShiftDown\b': 'from manim import FadeOut',
+    }
+    
+    # Check if specific imports are needed
+    for pattern, import_stmt in import_fixes.items():
+        if re.search(pattern, content) and import_stmt not in content:
+            # Add after main manim import
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if 'from manim import *' in line:
+                    lines.insert(i + 1, import_stmt)
+                    content = '\n'.join(lines)
+                    break
+    
+    return content
+
+
+def fix_method_signature_mismatches(content: str) -> str:
+    """Fix method signature mismatches based on common patterns."""
+    # Fix scale_to_fit_width/height with wrong arguments
+    content = re.sub(
+        r'\.scale_to_fit_width\(([^,)]+),\s*maintain_aspect_ratio\s*=\s*False\)',
+        r'.scale_to_fit_width(\1)',
+        content
+    )
+    content = re.sub(
+        r'\.scale_to_fit_height\(([^,)]+),\s*maintain_aspect_ratio\s*=\s*False\)',
+        r'.scale_to_fit_height(\1)',
+        content
+    )
+    
+    # Fix animate syntax changes
+    content = re.sub(
+        r'\.animate\.set_color\(([^)]+)\)',
+        r'.animate.become(self.copy().set_color(\1))',
+        content
+    )
+    
+    return content
+
+
+def add_missing_base_methods(content: str) -> str:
+    """Add missing base methods that ManimCE expects."""
+    # Check if we have custom Scene classes
+    scene_classes = re.findall(r'class\s+(\w+)\(.*Scene.*?\):', content)
+    
+    for scene_class in scene_classes:
+        # Check if construct method exists
+        if not re.search(rf'class\s+{scene_class}.*?def\s+construct\s*\(', content, re.DOTALL):
+            # Find the class and add construct method
+            class_pattern = rf'(class\s+{scene_class}\(.*?\):)'
+            replacement = r'\1\n    def construct(self):\n        pass  # TODO: Implement scene construction\n'
+            content = re.sub(class_pattern, replacement, content)
+    
+    return content
+
+
+def fix_color_constant_errors(content: str) -> str:
+    """Fix color constant errors more comprehensively."""
+    # Extended color mappings
+    extended_color_mappings = {
+        r'\bCOLOR_MAP\["([^"]+)"\]': lambda m: f'MANIM_COLORS["{m.group(1)}"]',
+        r'\bLIGHT_GRAY\b': 'LIGHT_GREY',
+        r'\bDARK_GRAY\b': 'DARK_GREY',
+        r'\bGRAY\b': 'GREY',
+        r'\bGRAY_A\b': 'GREY_A',
+        r'\bGRAY_B\b': 'GREY_B',
+        r'\bGRAY_C\b': 'GREY_C',
+        r'\bGRAY_D\b': 'GREY_D',
+        r'\bGRAY_E\b': 'GREY_E',
+    }
+    
+    for pattern, replacement in extended_color_mappings.items():
+        if callable(replacement):
+            content = re.sub(pattern, replacement, content)
+        else:
+            content = re.sub(pattern, replacement, content)
+    
+    return content
+
+
+def fix_tex_parenthesis_bug(content: str) -> str:
+    """Fix the specific bug where OldTex("(") becomes Tex("("))"""
+    # More precise patterns that won't match already-correct code
+    patterns = [
+        # Fix OldTex("X")) -> Tex("X") where X is any single character
+        (r'\b(?:Old)?Tex\("(.)"\)\)', r'Tex("\1")'),
+        # Fix OldTexText("X")) -> Text("X") 
+        (r'\b(?:Old)?TexText\("(.)"\)\)', r'Text("\1")'),
+        # Fix double closing parentheses in Tex/MathTex calls with single char
+        (r'\b(Tex|MathTex)\("(.)"\)\)', r'\1("\2")'),
+    ]
+    
+    fixed = content
+    changes_made = 0
+    for pattern, replacement in patterns:
+        matches = list(re.finditer(pattern, fixed))
+        if matches:
+            fixed = re.sub(pattern, replacement, fixed)
+            changes_made += len(matches)
+    
+    # Log if we made any fixes
+    if changes_made > 0:
+        import logging
+        logging.getLogger(__name__).info(f"Fixed {changes_made} Tex parenthesis bugs")
+    
+    return fixed
+
+
+def convert_class_names(content: str) -> str:
+    """Convert ManimGL class names to ManimCE equivalents."""
+    class_mappings = {
+        r'\bTextMobject\b': 'Text',
+        r'\bTexMobject\b': 'MathTex',
+        r'\bTexText\b': 'Tex',
+        r'\bOldTex\b': 'Tex',
+        r'\bOldTexText\b': 'Text',
+        r'\bShowCreation\b': 'Create',
+        r'\bUncreate\b': 'Uncreate',
+        r'\bCircleIndicate\b': 'Indicate',
+        r'\bShowCreationThenDestruction\b': 'ShowPassingFlash',
+        r'\bShowCreationThenFadeOut\b': 'ShowPassingFlash',  # Approximation
+    }
+    
+    for pattern, replacement in class_mappings.items():
+        content = re.sub(pattern, replacement, content)
+    
+    return content
+
+
 def apply_all_conversions(content: str) -> str:
     """Apply all conversion utilities to the content."""
     conversions = [
+        # fix_string_continuations,  # DISABLED: Too broad, affects non-string continuations
+        fix_tex_parenthesis_bug,  # FIX: Apply BEFORE class name conversion to avoid double parenthesis
+        convert_manimgl_imports,  # Convert imports first
+        fix_common_import_errors,  # NEW: Fix imports early
+        convert_class_names,  # Convert class names
         convert_continual_animation_to_updater,
         convert_old_color_names,
+        fix_color_constant_errors,  # NEW: More comprehensive color fixes
         convert_old_methods,
+        fix_method_signature_mismatches,  # NEW: Fix method signatures
         convert_transform_animations,
         convert_3d_scene_methods,
         add_config_dict_conversion,
         convert_frame_constants,
         add_undefined_class_stubs,
+        add_missing_base_methods,  # NEW: Add missing methods
+        add_path_functions,  # NEW: Add path function implementations
+        add_utility_functions,  # NEW: Add utility functions
         suggest_pi_creature_replacement,
     ]
     
@@ -489,3 +855,143 @@ class Test{scene_name}({base_class}):
 '''
     
     return test_code
+
+
+def add_path_functions(content: str) -> str:
+    """Add path function implementations if they're used in the code."""
+    path_functions_code = '''
+# Path functions for motion animations
+def straight_path(start_point, end_point):
+    """Create a straight path function from start to end."""
+    def path_func(t):
+        return interpolate(start_point, end_point, t)
+    return path_func
+
+def clockwise_path(start_point, end_point, center=None):
+    """Create a clockwise arc path function."""
+    if center is None:
+        center = (start_point + end_point) / 2
+    
+    def path_func(t):
+        # Calculate angles
+        start_angle = np.angle(complex(*(start_point - center)[:2]))
+        end_angle = np.angle(complex(*(end_point - center)[:2]))
+        
+        # Ensure clockwise motion
+        if end_angle > start_angle:
+            end_angle -= 2 * PI
+        
+        angle = interpolate(start_angle, end_angle, t)
+        radius = np.linalg.norm(start_point - center)
+        
+        return center + radius * np.array([np.cos(angle), np.sin(angle), 0])
+    
+    return path_func
+
+def counterclockwise_path(start_point, end_point, center=None):
+    """Create a counterclockwise arc path function."""
+    if center is None:
+        center = (start_point + end_point) / 2
+    
+    def path_func(t):
+        # Calculate angles
+        start_angle = np.angle(complex(*(start_point - center)[:2]))
+        end_angle = np.angle(complex(*(end_point - center)[:2]))
+        
+        # Ensure counterclockwise motion
+        if end_angle < start_angle:
+            end_angle += 2 * PI
+        
+        angle = interpolate(start_angle, end_angle, t)
+        radius = np.linalg.norm(start_point - center)
+        
+        return center + radius * np.array([np.cos(angle), np.sin(angle), 0])
+    
+    return path_func
+'''
+    
+    # Check if any path functions are used
+    needs_path_functions = any(
+        func in content for func in 
+        ['clockwise_path', 'counterclockwise_path', 'straight_path']
+    )
+    
+    if needs_path_functions:
+        # Add after imports
+        lines = content.split('\n')
+        insert_pos = 0
+        
+        # Find position after imports
+        for i, line in enumerate(lines):
+            if 'from manim import *' in line:
+                insert_pos = i + 1
+                # Skip any existing comments or empty lines
+                while insert_pos < len(lines) and (
+                    lines[insert_pos].strip() == '' or 
+                    lines[insert_pos].strip().startswith('#')
+                ):
+                    insert_pos += 1
+                break
+        
+        # Also need to import numpy and interpolate
+        if 'import numpy as np' not in content:
+            lines.insert(insert_pos, 'import numpy as np')
+            insert_pos += 1
+        
+        if 'from manim import interpolate' not in content:
+            # Check if we need to import interpolate and PI
+            needs_interpolate = 'interpolate' in path_functions_code
+            needs_pi = 'PI' in path_functions_code
+            imports_needed = []
+            
+            if needs_interpolate:
+                imports_needed.append('interpolate')
+            if needs_pi:
+                imports_needed.append('PI')
+                
+            if imports_needed:
+                lines.insert(insert_pos, f'from manim import {", ".join(imports_needed)}')
+                insert_pos += 1
+        
+        lines.insert(insert_pos, path_functions_code)
+        return '\n'.join(lines)
+    
+    return content
+
+
+def add_utility_functions(content: str) -> str:
+    """Add utility functions like get_room_colors if they're used."""
+    utility_functions_code = '''
+# Utility functions
+def get_room_colors():
+    """Return a color scheme for room visualization."""
+    return {
+        'walls': GREY_D,
+        'floor': GREY_E,
+        'ceiling': GREY_C,
+        'furniture': GREY_B,
+        'accent': BLUE_D,
+        'light': YELLOW,
+        'shadow': BLACK
+    }
+'''
+    
+    if 'get_room_colors' in content:
+        # Add after imports
+        lines = content.split('\n')
+        insert_pos = 0
+        
+        for i, line in enumerate(lines):
+            if 'from manim import *' in line:
+                insert_pos = i + 1
+                while insert_pos < len(lines) and (
+                    lines[insert_pos].strip() == '' or 
+                    lines[insert_pos].strip().startswith('#')
+                ):
+                    insert_pos += 1
+                break
+        
+        lines.insert(insert_pos, utility_functions_code)
+        return '\n'.join(lines)
+    
+    return content
