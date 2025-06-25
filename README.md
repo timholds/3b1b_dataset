@@ -1,5 +1,9 @@
 Title: 3b1b video matching
 
+## Architecture
+
+For a comprehensive overview of the system architecture, including all implemented components, data flow, and current capabilities, see **[docs/CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md)** - this is the definitive source of truth for understanding how the pipeline works.
+
 # Datasets
 We have two GitHub repos that contain manim code for various videos, and another repo that has the transcripts for those repos. 
 https://github.com/3b1b/captions

@@ -13,6 +13,10 @@ from typing import Dict, List, Tuple, Optional, Set, Any
 import subprocess
 import tempfile
 import shutil
+import sys
+
+# Add scripts directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
 
 # Import our modules
 from manimce_ast_converter import convert_with_ast, analyze_manimgl_usage
@@ -220,6 +224,22 @@ class AdvancedManimConverter:
         # Convert double backslashes to single in raw strings
         content = re.sub(r'(r["\'])([^"\']*?)\\\\([^"\']*?)\1', r'\1\2\\\3\1', content)
         
+        # Fix Tex/MathTex with list/constant arguments - add unpacking
+        # e.g., Tex(SOME_LIST) -> MathTex(*SOME_LIST)
+        content = re.sub(
+            r'\b(Tex|MathTex)\(([A-Z_]+(?:_TEXT|_LIST)?)\)',
+            r'MathTex(*\2)',
+            content
+        )
+        
+        # Handle cases with size parameter (convert to MathTex and remove size)
+        # e.g., Tex(SOME_LIST, size='\\large') -> MathTex(*SOME_LIST)
+        content = re.sub(
+            r'\bTex\(([A-Z_]+(?:_TEXT|_LIST)?),\s*size=[^)]+\)',
+            r'MathTex(*\1)',
+            content
+        )
+        
         return content
     
     def convert_continual_animations(self, content: str) -> str:
@@ -276,8 +296,8 @@ def {func_name}(mobject, dt):
             # Use regex helper's import filtering
             content = self.regex_helper.convert_imports(content)
             
-            # Use regex helper's string continuation fixes
-            content = self.regex_helper.fix_string_continuations(content)
+            # Use string continuation fixes from conversion utils
+            content = fix_string_continuations(content)
             
             # Use regex helper's TeX parentheses fixes
             content = self.regex_helper.fix_tex_parentheses(content)

@@ -251,11 +251,16 @@ create a file with comments explaining what went wrong."""
                 else:
                     current_timeout = timeout
                     
-                self.logger.info(f"Running Claude cleaning for {caption_dir} (attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, file size: {file_size:,} bytes)")
+                # More specific logging - check if this is a scene-specific cleaning
+                scene_name = video_id.split('_', 1)[-1] if '_' in video_id else None
+                if scene_name and scene_name != video_id:
+                    self.logger.info(f"Running Claude cleaning for scene '{scene_name}' in {caption_dir} (attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, {file_size:,} chars)")
+                else:
+                    self.logger.info(f"Running Claude cleaning for {caption_dir} (attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, file size: {file_size:,} bytes)")
                 start_time = time.time()
                 
-                # Run Claude with the cleaning prompt
-                claude_command =  ["claude", "--dangerously-skip-permissions",  "--model", "opus"]
+                # Run Claude with the cleaning prompt - now using sonnet
+                claude_command =  ["claude", "--dangerously-skip-permissions",  "--model", "sonnet"]
                 
                 try:
                     if self.verbose:
@@ -296,7 +301,12 @@ create a file with comments explaining what went wrong."""
                     f.write(result.stdout)
                     
                 elapsed_time = time.time() - start_time
-                self.logger.info(f"Claude cleaning completed for {caption_dir} in {elapsed_time:.1f} seconds")
+                # More specific logging - check if this is a scene-specific cleaning
+                scene_name = video_id.split('_', 1)[-1] if '_' in video_id else None
+                if scene_name and scene_name != video_id:
+                    self.logger.info(f"Claude cleaning completed for scene '{scene_name}' in {caption_dir} in {elapsed_time:.1f} seconds")
+                else:
+                    self.logger.info(f"Claude cleaning completed for {caption_dir} in {elapsed_time:.1f} seconds")
                     
                 return {
                     "status": "completed",
@@ -538,8 +548,38 @@ create a file with comments explaining what went wrong."""
         with open(checkpoint_file, 'w') as f:
             json.dump(checkpoint_data, f, indent=2)
     
-    def clean_all_matched_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None, resume: bool = True, force: bool = False) -> Dict:
-        """Clean all successfully matched videos for a given year."""
+    def save_video_log(self, video_dir: Path, stage: str, log_data: Dict):
+        """Save stage-specific log data to the video's logs.json file."""
+        log_file = video_dir / 'logs.json'
+        
+        # Load existing logs if file exists
+        if log_file.exists():
+            with open(log_file) as f:
+                logs = json.load(f)
+        else:
+            logs = {}
+        
+        # Add or update the stage log
+        logs[stage] = {
+            'timestamp': datetime.now().isoformat(),
+            'data': log_data
+        }
+        
+        # Save updated logs
+        with open(log_file, 'w') as f:
+            json.dump(logs, f, indent=2)
+    
+    def clean_all_matched_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None, 
+                               resume: bool = True, force: bool = False, mode: str = 'scene') -> Dict:
+        """Clean all successfully matched videos for a given year.
+        
+        Args:
+            year: Year to process
+            video_filter: List of specific videos to process
+            resume: Whether to resume from checkpoint
+            force: Force re-cleaning of already cleaned files
+            mode: 'monolithic' (default) or 'scene' for scene-by-scene cleaning
+        """
         # Load match results
         match_results = self.load_match_results(year)
         
@@ -552,6 +592,8 @@ create a file with comments explaining what went wrong."""
             filtered_results = {k: v for k, v in match_results.items() if k in video_filter}
             self.logger.info(f"Filtering to {len(filtered_results)} videos: {video_filter}")
             match_results = filtered_results
+            
+        self.logger.info(f"Cleaning mode: {mode}")
             
         # Load checkpoint if resuming
         checkpoint = {"completed_videos": [], "failed_videos": {}}
@@ -601,6 +643,56 @@ create a file with comments explaining what went wrong."""
                 elif 'no primary files' in reason.lower():
                     stats['no_files'] += 1
                 continue
+                
+            # Use scene-by-scene cleaning if mode is 'scene'
+            if mode == 'scene':
+                try:
+                    from clean_matched_code_scenes import SceneAwareCleaner
+                    scene_cleaner = SceneAwareCleaner(
+                        str(self.base_dir), 
+                        verbose=self.verbose,
+                        timeout_multiplier=self.timeout_multiplier,
+                        max_retries=self.max_retries
+                    )
+                    
+                    self.logger.info(f"Using scene-by-scene cleaning for {caption_dir}")
+                    result = scene_cleaner.clean_video_by_scenes(
+                        video_id, caption_dir, match_data, year
+                    )
+                    
+                    if result.get('status') in ['completed', 'partial']:
+                        if result.get('combine_success'):
+                            stats['cleaned'] += 1
+                            checkpoint["completed_videos"].append(caption_dir)
+                        else:
+                            stats['failed'] += 1
+                            checkpoint["failed_videos"][caption_dir] = "Scene combination failed"
+                    else:
+                        stats['failed'] += 1
+                        checkpoint["failed_videos"][caption_dir] = result.get('error', 'Unknown error')
+                        
+                    cleaning_results[caption_dir] = result
+                    self.save_cleaning_checkpoint(year, checkpoint)
+                    
+                    # Update match file with cleaning status
+                    match_data['cleaning_status'] = result.get('status', 'failed')
+                    match_data['cleaning_mode'] = 'scene'
+                    match_data['cleaning_timestamp'] = datetime.now().isoformat()
+                    
+                    match_file = self.output_dir / str(year) / caption_dir / 'matches.json'
+                    with open(match_file, 'w') as f:
+                        json.dump(match_data, f, indent=2)
+                    
+                    # Save cleaning log
+                    video_dir = self.output_dir / str(year) / caption_dir
+                    self.save_video_log(video_dir, 'cleaning', result)
+                    
+                    time.sleep(2)
+                    continue
+                    
+                except Exception as e:
+                    self.logger.error(f"Scene cleaning failed for {caption_dir}, falling back to monolithic: {e}")
+                    # Fall through to monolithic cleaning
                 
             # Estimate file sizes
             all_files = match_data.get('primary_files', []) + match_data.get('supporting_files', [])
@@ -759,6 +851,8 @@ def main():
                         help='Clear the checkpoint file before starting')
     parser.add_argument('--force', action='store_true',
                         help='Force re-cleaning of already cleaned files')
+    parser.add_argument('--mode', choices=['monolithic', 'scene'], default='scene',
+                        help='Cleaning mode: scene-by-scene (default) or monolithic')
     
     args = parser.parse_args()
     
@@ -774,10 +868,26 @@ def main():
             
             if should_clean:
                 video_id = match_data.get('video_id', 'unknown')
-                all_files = match_data.get('primary_files', []) + match_data.get('supporting_files', [])
-                total_size = cleaner.estimate_total_file_size(all_files, args.year)
-                prompt = cleaner.create_cleaning_prompt(video_id, args.video, match_data, args.year)
-                result = cleaner.run_claude_cleaning(prompt, video_id, args.video, year=args.year, file_size=total_size, max_retries=args.max_retries)
+                
+                if args.mode == 'scene':
+                    # Use scene-by-scene cleaning
+                    from clean_matched_code_scenes import SceneAwareCleaner
+                    scene_cleaner = SceneAwareCleaner(
+                        str(base_dir), 
+                        verbose=args.verbose,
+                        timeout_multiplier=args.timeout_multiplier,
+                        max_retries=args.max_retries
+                    )
+                    result = scene_cleaner.clean_video_by_scenes(
+                        video_id, args.video, match_data, args.year
+                    )
+                else:
+                    # Use monolithic cleaning
+                    all_files = match_data.get('primary_files', []) + match_data.get('supporting_files', [])
+                    total_size = cleaner.estimate_total_file_size(all_files, args.year)
+                    prompt = cleaner.create_cleaning_prompt(video_id, args.video, match_data, args.year)
+                    result = cleaner.run_claude_cleaning(prompt, video_id, args.video, year=args.year, 
+                                                       file_size=total_size, max_retries=args.max_retries)
                 print(f"Cleaning result: {result}")
             else:
                 print(f"Video should not be cleaned: {reason}")
@@ -792,7 +902,8 @@ def main():
                 print(f"Cleared checkpoint file: {checkpoint_file}")
         
         # Clean all matched videos
-        summary = cleaner.clean_all_matched_videos(year=args.year, resume=not args.no_resume, force=args.force)
+        summary = cleaner.clean_all_matched_videos(year=args.year, resume=not args.no_resume, 
+                                                   force=args.force, mode=args.mode)
         
         print("\nCleaning Summary:")
         print(f"Total matched videos: {summary['stats']['total_matched']}")

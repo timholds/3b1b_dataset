@@ -5,7 +5,7 @@ This directory contains the core scripts for building the 3Blue1Brown dataset, i
 ## 🚀 Quick Start
 
 ```bash
-# Run the complete pipeline for a year
+# Run the complete pipeline for a year (uses scene-by-scene mode by default)
 python scripts/build_dataset_pipeline.py --year 2015
 
 # Process with video rendering
@@ -13,6 +13,9 @@ python scripts/build_dataset_pipeline.py --year 2015 --render
 
 # Quick test with limited rendering
 python scripts/build_dataset_pipeline.py --year 2015 --render-preview
+
+# Force reprocess everything for a video
+python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --force-clean --force-convert
 ```
 
 ## 📁 Core Scripts
@@ -26,13 +29,20 @@ python scripts/build_dataset_pipeline.py --year 2015 --render-preview
 
 ### Core Pipeline Components
 1. **`claude_match_videos.py`** - AI-powered video-to-code matching
-2. **`clean_matched_code.py`** - Code cleaning and import inlining  
-3. **`convert_manimgl_to_manimce.py`** - ManimGL to ManimCE converter
-4. **`render_videos.py`** - Video rendering from ManimCE code
+2. **`clean_matched_code.py`** - Code cleaning and import inlining (monolithic mode)
+3. **`clean_matched_code_scenes.py`** - Scene-aware cleaning with dependency analysis ✨
+4. **`convert_manimgl_to_manimce.py`** - ManimGL to ManimCE converter (monolithic mode)
+5. **`convert_manimgl_to_manimce_scenes.py`** - Scene-level conversion with parallel processing ✨
+6. **`render_videos.py`** - Video rendering from ManimCE code
 
 ### Supporting Scripts
 - **`manimce_conversion_utils.py`** - Utility functions for code conversion
 - **`manimce_characters.py`** - Pi Creature replacements for ManimCE
+- **`scene_dependency_analyzer.py`** - Advanced AST-based dependency extraction ✨
+- **`scene_relationship_analyzer.py`** - Analyzes relationships between scenes ✨
+- **`scene_validator.py`** - Validates cleaned scenes before conversion ✨
+- **`manimce_precompile_validator.py`** - Pre-compile validation with auto-fixes
+- **`extract_training_snippets.py`** - Extract self-contained scene snippets
 - **`extract_video_urls.py`** - Extract YouTube metadata from captions
   ```bash
   python extract_video_urls.py --year 2015
@@ -51,23 +61,28 @@ python scripts/build_dataset_pipeline.py --year 2015 --render-preview
 
 ```
 1. MATCHING: Match videos to code files using AI
-   └─> output/v5/{year}/*/matches.json
+   └─> outputs/{year}/*/matches.json
 
-2. CLEANING: Inline imports and create single files
-   └─> output/v5/{year}/*/cleaned_code.py
+2. CLEANING: Scene-aware cleaning with dependency analysis
+   ├─> outputs/{year}/*/cleaned_scenes/*.py (individual scenes)
+   └─> outputs/{year}/*/cleaned_code.py (combined file)
 
-3. CONVERSION: Convert ManimGL to ManimCE
-   └─> output/v5/{year}/*/manimce_code.py
+3. CONVERSION: Scene-level ManimGL to ManimCE conversion
+   ├─> outputs/{year}/*/manimce_scenes/*.py (individual scenes)
+   └─> outputs/{year}/*/manimce_code.py (combined file)
 
 4. RENDERING: Render videos (optional)
-   └─> output/rendered_videos/{year}/*/*.mp4
+   └─> outputs/{year}/*/rendered_videos/*.mp4
+
+5. SNIPPET EXTRACTION: Extract self-contained training snippets
+   └─> outputs/{year}/*/snippets/*.py
 ```
 
 ## 📋 Common Commands
 
 ### Process Everything
 ```bash
-# Default: match, clean, convert (no rendering)
+# Default: match, clean, convert (no rendering) - uses scene mode
 python scripts/build_dataset_pipeline.py --year 2015
 
 # With rendering
@@ -75,6 +90,9 @@ python scripts/build_dataset_pipeline.py --year 2015 --render
 
 # Quick preview (5 videos, 2 scenes each)
 python scripts/build_dataset_pipeline.py --year 2015 --render-preview
+
+# Use monolithic mode for simple files
+python scripts/build_dataset_pipeline.py --year 2015 --cleaning-mode monolithic --conversion-mode monolithic
 ```
 
 ### Process Specific Videos
@@ -137,19 +155,28 @@ python scripts/test_video_rendering.py
 
 ```
 3b1b_dataset/
-├── output/
-│   ├── v5/{year}/                      # Matched and cleaned code
-│   │   └── {video-name}/
-│   │       ├── matches.json            # Matching results
-│   │       ├── cleaned_code.py         # Inlined imports
-│   │       └── manimce_code.py         # Converted code
-│   ├── rendered_videos/{year}/         # Rendered videos
-│   ├── matching_summary_{year}.json    # Matching statistics
-│   ├── cleaning_summary_{year}.json    # Cleaning statistics
-│   └── pipeline_report_{year}.txt      # Full pipeline report
-└── data/
-    ├── youtube_metadata/               # Video mappings
-    └── youtube_transcripts/            # Fetched transcripts
+└── outputs/
+    ├── {year}/
+    │   └── {video-name}/
+    │       ├── matches.json              # Matching results
+    │       ├── cleaned_code.py           # Combined cleaned code
+    │       ├── cleaned_scenes/           # Individual cleaned scenes ✨
+    │       │   └── *.py
+    │       ├── manimce_code.py           # Combined converted code
+    │       ├── manimce_scenes/           # Individual converted scenes ✨
+    │       │   └── *.py
+    │       ├── rendered_videos/          # Rendered videos
+    │       │   └── *.mp4
+    │       ├── snippets/                 # Training snippets
+    │       │   └── *.py
+    │       ├── logs.json                 # Processing logs
+    │       └── scene_validation_report.txt # Validation report ✨
+    ├── logs/
+    │   ├── pipeline_history.jsonl        # Consolidated history
+    │   ├── scene_validation_summary_{year}.json ✨
+    │   └── cleaning/                     # Cleaning logs
+    ├── pipeline_report_{year}_latest.json
+    └── pipeline_report_{year}.txt
 ```
 
 ## ⚙️ Configuration
@@ -167,11 +194,20 @@ Videos listed in `excluded-videos.txt` are automatically skipped during processi
 1. **Import errors**: Check that all dependencies are installed
 2. **Rendering timeouts**: Use `--render-scenes-limit` to test fewer scenes
 3. **Memory issues**: Process fewer videos at once with `--video` filter
+4. **Scene dependencies missing**: Check `scene_validation_report.txt` for details
+5. **Cleaning failures**: Progressive recovery will attempt multiple strategies
 
 ### Debug Options
-- Add `--verbose` for detailed logging
-- Check logs in `output/pipeline_logs/`
+- Add `--verbose` or `-v` for detailed logging
+- Check scene validation reports in video directories
+- Review `outputs/logs/scene_validation_summary_{year}.json`
 - Individual stage logs in respective output directories
+
+### New Features (Dec 2024) ✨
+- **Advanced Dependency Analysis**: Automatically extracts all required functions, classes, and constants
+- **Scene Relationship Analysis**: Preserves mathematical flow between scenes
+- **Inter-stage Validation**: Catches errors before expensive conversion
+- **Progressive Error Recovery**: Multiple strategies to fix failed scenes
 
 ## 📚 Requirements
 

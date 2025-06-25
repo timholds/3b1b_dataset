@@ -574,9 +574,32 @@ def fix_string_continuations(content: str) -> str:
 
 def convert_manimgl_imports(content: str) -> str:
     """Convert ManimGL imports to ManimCE imports."""
+    # Special case: manimlib.imports doesn't exist in ManimCE
+    # Convert specific imports from manimlib.imports to wildcard import
+    content = re.sub(r'from manimlib\.imports import .*', 'from manim import *', content)
+    
     # Replace manimlib imports with manim
     content = re.sub(r'from manimlib import \*', 'from manim import *', content)
-    content = re.sub(r'from manimlib\.', 'from manim.', content)
+    
+    # Only convert top-level module imports that have direct equivalents
+    # Don't convert deep imports like manimlib.scene.scene as they don't exist in ManimCE
+    valid_module_conversions = [
+        (r'from manimlib\.animation import', 'from manim.animation import'),
+        (r'from manimlib\.mobject import', 'from manim.mobject import'),
+        (r'from manimlib\.scene import', 'from manim.scene import'),
+        (r'from manimlib\.utils import', 'from manim.utils import'),
+        (r'from manimlib\.camera import', 'from manim.camera import'),
+        (r'from manimlib\.constants import', 'from manim.constants import'),
+    ]
+    
+    for old_pattern, new_pattern in valid_module_conversions:
+        content = re.sub(old_pattern, new_pattern, content)
+    
+    # For any remaining deep manimlib imports, convert to general manim import
+    # e.g., from manimlib.scene.scene import Scene -> from manim import *
+    content = re.sub(r'from manimlib\.[.\w]+ import .*', 'from manim import *', content)
+    
+    # General import statement
     content = re.sub(r'import manimlib', 'import manim', content)
     
     # Replace manim_imports_ext
@@ -728,13 +751,81 @@ def fix_tex_parenthesis_bug(content: str) -> str:
     return fixed
 
 
+def contains_math_content(text: str) -> bool:
+    """Detect if a string contains mathematical content that requires MathTex."""
+    # Math patterns that indicate mathematical content
+    math_patterns = [
+        r'\\frac', r'\\cdot', r'\\sqrt', r'\\sum', r'\\int', r'\\lim',
+        r'\\infty', r'\\alpha', r'\\beta', r'\\gamma', r'\\theta', r'\\phi',
+        r'\\pi', r'\\sigma', r'\\omega', r'\\times', r'\\div', r'\\pm',
+        r'\\leq', r'\\geq', r'\\neq', r'\\approx', r'\\equiv', r'\\propto',
+        r'\\partial', r'\\nabla', r'\\forall', r'\\exists', r'\\in',
+        r'\\subset', r'\\cup', r'\\cap', r'\\wedge', r'\\vee', r'\\oplus',
+        r'\\otimes', r'\\perp', r'\\ldots', r'\\cdots', r'\\vdots', r'\\ddots',
+        r'\^', r'_',  # Superscript and subscript
+        r'\\\\', # Double backslash for line breaks in math
+        r'\\zeta', r'\\Delta', r'\\Sigma', r'\\Lambda',
+        r'\\left', r'\\right', r'\\big', r'\\Big',
+        r'\\begin\{', r'\\end\{',  # Math environments
+        r'\\mathbb', r'\\mathcal', r'\\mathfrak',
+        r'\\text\{', r'\\mathrm\{',
+    ]
+    
+    # Check for any math patterns
+    for pattern in math_patterns:
+        if pattern in text:
+            return True
+    
+    # Check for dollar sign math mode
+    if '$' in text:
+        return True
+        
+    # Check for common equation patterns
+    if any(op in text for op in ['=', '+', '-', '*', '/', '<', '>', '≤', '≥', '≠']):
+        # But exclude simple text that happens to have these
+        if not any(word in text.lower() for word in ['http', 'https', 'email', '@']):
+            # Check if it looks like an equation
+            if re.search(r'\b\w+\s*[=+\-*/]\s*\w+', text):
+                return True
+    
+    return False
+
+
 def convert_class_names(content: str) -> str:
     """Convert ManimGL class names to ManimCE equivalents."""
+    # First handle OldTex with math detection
+    def replace_oldtex(match):
+        full_match = match.group(0)
+        # Try to extract the string argument if present
+        string_match = re.search(r'OldTex\(\s*["\']([^"\']*)["\']', full_match)
+        if string_match:
+            tex_content = string_match.group(1)
+            if contains_math_content(tex_content):
+                return full_match.replace('OldTex', 'MathTex')
+        return full_match.replace('OldTex', 'Tex')
+    
+    # Apply OldTex conversion with content detection
+    content = re.sub(r'OldTex\([^)]*\)', replace_oldtex, content)
+    
+    # Now handle direct Tex() calls
+    def replace_tex(match):
+        full_match = match.group(0)
+        # Try to extract the string argument if present
+        string_match = re.search(r'\bTex\(\s*["\']([^"\']*)["\']', full_match)
+        if string_match:
+            tex_content = string_match.group(1)
+            if contains_math_content(tex_content):
+                return full_match.replace('Tex(', 'MathTex(')
+        return full_match
+    
+    # Apply Tex conversion with content detection
+    content = re.sub(r'\bTex\(\s*["\'][^"\']*["\'][^)]*\)', replace_tex, content)
+    
+    # Other class mappings
     class_mappings = {
         r'\bTextMobject\b': 'Text',
         r'\bTexMobject\b': 'MathTex',
         r'\bTexText\b': 'Tex',
-        r'\bOldTex\b': 'Tex',
         r'\bOldTexText\b': 'Text',
         r'\bShowCreation\b': 'Create',
         r'\bUncreate\b': 'Uncreate',
@@ -757,6 +848,7 @@ def apply_all_conversions(content: str) -> str:
         convert_manimgl_imports,  # Convert imports first
         fix_common_import_errors,  # NEW: Fix imports early
         convert_class_names,  # Convert class names
+        convert_parameterized_scenes,  # NEW: Convert parameterized construct methods
         convert_continual_animation_to_updater,
         convert_old_color_names,
         fix_color_constant_errors,  # NEW: More comprehensive color fixes
@@ -805,7 +897,55 @@ def convert_latex_strings(content: str) -> str:
         clean_latex = latex_content.strip('$')
         return f'MathTex("{clean_latex}"'
     
-    return re.sub(pattern, replace_latex, content)
+    content = re.sub(pattern, replace_latex, content)
+    
+    # Fix Tex/MathTex with list/constant arguments - add unpacking
+    # For variables that likely contain math content based on their names
+    math_var_patterns = ['equation', 'formula', 'math', 'expr', 'sum', 'integral', 'derivative']
+    
+    def should_use_mathtex_for_var(var_name):
+        """Check if a variable name suggests mathematical content."""
+        var_lower = var_name.lower()
+        return any(pattern in var_lower for pattern in math_var_patterns)
+    
+    # Handle Tex with variable arguments
+    def replace_tex_with_var(match):
+        var_name = match.group(2)
+        if should_use_mathtex_for_var(var_name):
+            return f'MathTex(*{var_name})'
+        else:
+            # Keep as Tex for text content
+            return f'Tex(*{var_name})'
+    
+    content = re.sub(
+        r'\b(Tex)\(([A-Z_]+(?:_TEXT|_LIST)?)\)',
+        replace_tex_with_var,
+        content
+    )
+    
+    # Already converted MathTex should keep the unpacking
+    content = re.sub(
+        r'\bMathTex\(([A-Z_]+(?:_TEXT|_LIST)?)\)',
+        r'MathTex(*\1)',
+        content
+    )
+    
+    # Handle cases with size parameter - check if it's math content
+    def replace_tex_with_size(match):
+        var_name = match.group(1)
+        if should_use_mathtex_for_var(var_name):
+            return f'MathTex(*{var_name})'
+        else:
+            # For text content, keep as Tex and remove size parameter
+            return f'Tex(*{var_name})'
+    
+    content = re.sub(
+        r'\bTex\(([A-Z_]+(?:_TEXT|_LIST)?),\s*size\s*=\s*[^)]+\)',
+        replace_tex_with_size,
+        content
+    )
+    
+    return content
 
 
 def add_scene_config_decorator(content: str) -> str:
@@ -995,3 +1135,121 @@ def get_room_colors():
         return '\n'.join(lines)
     
     return content
+
+
+def convert_parameterized_scenes(content: str) -> str:
+    """Convert ManimGL parameterized scenes to ManimCE compatible format.
+    
+    ManimGL allows construct(self, param1, param2) but ManimCE only supports construct(self).
+    This function:
+    1. Detects parameterized construct methods
+    2. Creates an __init__ method to store parameters
+    3. Converts construct to use self.param instead of direct parameters
+    """
+    import re
+    
+    lines = content.split('\n')
+    result_lines = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        
+        # Look for class definitions
+        class_match = re.match(r'^class\s+(\w+).*:', line)
+        if class_match:
+            class_name = class_match.group(1)
+            result_lines.append(line)
+            i += 1
+            
+            # Look for parameterized construct within this class
+            class_indent = len(line) - len(line.lstrip())
+            method_indent = ' ' * (class_indent + 4)
+            
+            # Find the construct method
+            construct_start = -1
+            construct_params = None
+            
+            j = i
+            while j < len(lines) and (lines[j].strip() == '' or lines[j].startswith(' ')):
+                construct_match = re.match(
+                    rf'^{method_indent}def\s+construct\s*\(\s*self\s*,\s*([^)]+)\)\s*:',
+                    lines[j]
+                )
+                
+                if construct_match:
+                    construct_start = j
+                    # Parse parameters
+                    params_str = construct_match.group(1)
+                    # Remove default values for parsing
+                    params_str = re.sub(r'=\s*[^,)]+', '', params_str)
+                    construct_params = [p.strip() for p in params_str.split(',') if p.strip()]
+                    break
+                    
+                # Stop if we hit another method or class
+                if lines[j].strip() and not lines[j].startswith(' '):
+                    break
+                j += 1
+            
+            if construct_start >= 0 and construct_params:
+                # We found a parameterized construct method
+                # First, check if __init__ already exists
+                has_init = False
+                for k in range(i, construct_start):
+                    if re.match(rf'^{method_indent}def\s+__init__', lines[k]):
+                        has_init = True
+                        break
+                
+                if not has_init:
+                    # Add __init__ method
+                    init_lines = [
+                        f'{method_indent}def __init__(self, {", ".join(construct_params)}):',
+                        f'{method_indent}    super().__init__()'
+                    ]
+                    for param in construct_params:
+                        init_lines.append(f'{method_indent}    self.{param} = {param}')
+                    init_lines.append('')
+                    
+                    # Insert __init__ after class definition
+                    result_lines.extend(init_lines)
+                
+                # Now process the construct method and replace parameters
+                while i < construct_start:
+                    result_lines.append(lines[i])
+                    i += 1
+                
+                # Change construct signature
+                result_lines.append(f'{method_indent}def construct(self):')
+                i += 1
+                
+                # Process construct body, replacing parameter references
+                while i < len(lines):
+                    if i >= len(lines):
+                        break
+                        
+                    line = lines[i]
+                    
+                    # Check if we've left the construct method
+                    if line.strip() and not line.startswith(method_indent + ' '):
+                        # We've hit another method or end of class
+                        break
+                    
+                    # Replace parameter references with self.param
+                    modified_line = line
+                    for param in construct_params:
+                        # Match param as a standalone word (not part of another identifier)
+                        modified_line = re.sub(
+                            rf'\b{param}\b',
+                            f'self.{param}',
+                            modified_line
+                        )
+                    
+                    result_lines.append(modified_line)
+                    i += 1
+                
+                continue
+        
+        result_lines.append(line)
+        i += 1
+    
+    return '\n'.join(result_lines)

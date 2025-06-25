@@ -12,6 +12,23 @@ from typing import Dict, List, Set, Optional, Tuple, Any
 import re
 
 
+class ParamToSelfReplacer(ast.NodeTransformer):
+    """Replace parameter names with self.param_name in construct method."""
+    
+    def __init__(self, param_names: Set[str]):
+        self.param_names = param_names
+    
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        """Replace parameter names with self.param."""
+        if node.id in self.param_names and isinstance(node.ctx, ast.Load):
+            return ast.Attribute(
+                value=ast.Name(id='self', ctx=ast.Load()),
+                attr=node.id,
+                ctx=ast.Load()
+            )
+        return node
+
+
 class ManimASTTransformer(ast.NodeTransformer):
     """Main AST transformer for converting ManimGL code to ManimCE."""
     
@@ -21,6 +38,25 @@ class ManimASTTransformer(ast.NodeTransformer):
         self.pi_creature_vars: Set[str] = set()
         self.conversion_log: List[str] = []
         self.issues: List[Dict[str, Any]] = []
+        self.parameterized_scenes: Dict[str, List[str]] = {}  # Track scenes with parameters
+        
+        # Math patterns for Tex vs MathTex detection
+        self.math_patterns = [
+            r'\\frac', r'\\cdot', r'\\sqrt', r'\\sum', r'\\int', r'\\lim',
+            r'\\infty', r'\\alpha', r'\\beta', r'\\gamma', r'\\theta', r'\\phi',
+            r'\\pi', r'\\sigma', r'\\omega', r'\\times', r'\\div', r'\\pm',
+            r'\\leq', r'\\geq', r'\\neq', r'\\approx', r'\\equiv', r'\\propto',
+            r'\\partial', r'\\nabla', r'\\forall', r'\\exists', r'\\in',
+            r'\\subset', r'\\cup', r'\\cap', r'\\wedge', r'\\vee', r'\\oplus',
+            r'\\otimes', r'\\perp', r'\\ldots', r'\\cdots', r'\\vdots', r'\\ddots',
+            r'\^', r'_',  # Superscript and subscript
+            r'\\\\', # Double backslash for line breaks in math
+            r'\\zeta', r'\\Delta', r'\\Sigma', r'\\Lambda',
+            r'\\left', r'\\right', r'\\big', r'\\Big',
+            r'\\begin\{', r'\\end\{',  # Math environments
+            r'\\mathbb', r'\\mathcal', r'\\mathfrak',
+            r'\\text\{', r'\\mathrm\{',
+        ]
         
         # Animation parameter mappings
         self.animation_mappings = {
@@ -90,6 +126,152 @@ class ManimASTTransformer(ast.NodeTransformer):
             'Mobject1D': 'VMobject',  # No direct equivalent
             'Mobject2D': 'VMobject',  # No direct equivalent
         }
+    
+    def _contains_math(self, text: str) -> bool:
+        """Detect if a string contains mathematical content that requires MathTex."""
+        # Check for any math patterns
+        for pattern in self.math_patterns:
+            if pattern in text:
+                return True
+        
+        # Check for dollar sign math mode
+        if '$' in text:
+            return True
+            
+        # Check for common equation patterns
+        if any(op in text for op in ['=', '+', '-', '*', '/', '<', '>', '≤', '≥', '≠']):
+            # But exclude simple text that happens to have these
+            if not any(word in text.lower() for word in ['http', 'https', 'email', '@']):
+                # Check if it looks like an equation
+                if re.search(r'\b\w+\s*[=+\-*/]\s*\w+', text):
+                    return True
+        
+        return False
+    
+    def _contains_latex(self, text: str) -> bool:
+        """Detect if a string contains LaTeX content (including non-math LaTeX)."""
+        # First check if it contains math
+        if self._contains_math(text):
+            return True
+            
+        # Check for LaTeX environments (both math and text)
+        latex_environments = [
+            r'\\begin{', r'\\end{',  # Any environment
+            r'\\begin{flushleft}', r'\\begin{flushright}', r'\\begin{center}',
+            r'\\begin{itemize}', r'\\begin{enumerate}', r'\\begin{description}',
+            r'\\begin{quote}', r'\\begin{quotation}', r'\\begin{verse}',
+            r'\\begin{tabular}', r'\\begin{table}', r'\\begin{figure}',
+            r'\\begin{align}', r'\\begin{equation}', r'\\begin{matrix}',
+            r'\\begin{array}', r'\\begin{cases}', r'\\begin{pmatrix}',
+        ]
+        
+        for env in latex_environments:
+            if env in text:
+                return True
+                
+        # Check for other LaTeX commands (non-math)
+        latex_commands = [
+            r'\\textbf{', r'\\textit{', r'\\underline{', r'\\emph{',
+            r'\\large', r'\\Large', r'\\LARGE', r'\\huge', r'\\Huge',
+            r'\\small', r'\\footnotesize', r'\\scriptsize', r'\\tiny',
+            r'\\section{', r'\\subsection{', r'\\paragraph{',
+            r'\\item', r'\\hline', r'\\vspace{', r'\\hspace{',
+            r'\\newline', r'\\linebreak', r'\\\\',  # Line breaks
+            r'\\quad', r'\\qquad', r'\\hfill', r'\\vfill',
+            r'\\label{', r'\\ref{', r'\\cite{',
+        ]
+        
+        for cmd in latex_commands:
+            if cmd in text:
+                return True
+                
+        # Check for escaped special characters (indicates LaTeX)
+        if re.search(r'\\[#$%&_{}~^]', text):
+            return True
+            
+        return False
+    
+    def _create_init_for_params(self, construct_method: ast.FunctionDef) -> ast.FunctionDef:
+        """Create an __init__ method that accepts the construct parameters."""
+        # Get parameters from construct (excluding self)
+        params = construct_method.args.args[1:]
+        defaults = construct_method.args.defaults
+        
+        # Create __init__ body that stores parameters as attributes
+        init_body = []
+        
+        # Add super().__init__() call
+        super_call = ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Call(
+                        func=ast.Name(id='super', ctx=ast.Load()),
+                        args=[],
+                        keywords=[]
+                    ),
+                    attr='__init__',
+                    ctx=ast.Load()
+                ),
+                args=[],
+                keywords=[]
+            )
+        )
+        init_body.append(super_call)
+        
+        # Store each parameter as an instance attribute
+        for param in params:
+            assign = ast.Assign(
+                targets=[
+                    ast.Attribute(
+                        value=ast.Name(id='self', ctx=ast.Load()),
+                        attr=param.arg,
+                        ctx=ast.Store()
+                    )
+                ],
+                value=ast.Name(id=param.arg, ctx=ast.Load())
+            )
+            init_body.append(assign)
+        
+        # Create __init__ function
+        init_func = ast.FunctionDef(
+            name='__init__',
+            args=ast.arguments(
+                args=[ast.arg(arg='self', annotation=None)] + params,
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=defaults,
+                posonlyargs=[]
+            ),
+            body=init_body,
+            decorator_list=[],
+            returns=None
+        )
+        
+        return init_func
+    
+    def _convert_parameterized_construct(self, construct_method: ast.FunctionDef) -> ast.FunctionDef:
+        """Convert a parameterized construct method to use self attributes."""
+        # Create new construct with only self parameter
+        new_construct = ast.FunctionDef(
+            name='construct',
+            args=ast.arguments(
+                args=[ast.arg(arg='self', annotation=None)],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+                posonlyargs=[]
+            ),
+            body=construct_method.body,
+            decorator_list=construct_method.decorator_list,
+            returns=construct_method.returns
+        )
+        
+        # Replace parameter references with self.param
+        param_names = {arg.arg for arg in construct_method.args.args[1:]}
+        replacer = ParamToSelfReplacer(param_names)
+        new_construct = replacer.visit(new_construct)
+        
+        return new_construct
         
     def visit_Import(self, node: ast.Import) -> Optional[ast.Import]:
         """Handle import statements."""
@@ -198,8 +380,37 @@ class ManimASTTransformer(ast.NodeTransformer):
             elif class_name in self.class_mappings:
                 new_class = self.class_mappings[class_name]
                 if new_class:
+                    # Special case: OldTex should check for math content
+                    if class_name == 'OldTex' and node.args:
+                        # Check if the content is mathematical
+                        is_math = False
+                        if isinstance(node.args[0], ast.Str):
+                            is_math = self._contains_math(node.args[0].s)
+                        
+                        # Override mapping if math content detected
+                        if is_math:
+                            new_class = 'MathTex'
+                            self.conversion_log.append(f"Converted class: {class_name} → MathTex (detected math)")
+                        else:
+                            self.conversion_log.append(f"Converted class: {class_name} → Tex")
+                    # Special case: OldTexText should check for LaTeX content
+                    elif class_name == 'OldTexText' and node.args:
+                        # Check if the content has LaTeX (not just math)
+                        has_latex = False
+                        if isinstance(node.args[0], ast.Str):
+                            has_latex = self._contains_latex(node.args[0].s)
+                        
+                        # Use Tex for LaTeX content, Text for plain text
+                        if has_latex:
+                            new_class = 'Tex'
+                            self.conversion_log.append(f"Converted class: {class_name} → Tex (detected LaTeX)")
+                        else:
+                            new_class = 'Text'
+                            self.conversion_log.append(f"Converted class: {class_name} → Text (plain text)")
+                    else:
+                        self.conversion_log.append(f"Converted class: {class_name} → {new_class}")
+                    
                     node.func.id = new_class
-                    self.conversion_log.append(f"Converted class: {class_name} → {new_class}")
                     
                     # Special handling for Tex/Text with LaTeX
                     if new_class in ['Tex', 'MathTex'] and node.args:
@@ -210,6 +421,29 @@ class ManimASTTransformer(ast.NodeTransformer):
                                 node.args[i] = ast.Str(s=arg.s)
                                 # Mark that this needs raw string handling
                                 node.args[i]._needs_raw = True
+            
+            # Special handling for direct Tex() calls - decide between Tex and MathTex
+            elif class_name == 'Tex':
+                # Check if the content is mathematical
+                is_math = False
+                if node.args:
+                    # Check first argument if it's a string
+                    if isinstance(node.args[0], ast.Str):
+                        is_math = self._contains_math(node.args[0].s)
+                    # Check if it's a list being unpacked (common pattern)
+                    elif isinstance(node.args[0], ast.Name):
+                        # If it's a variable, we'll assume it's math if it has certain patterns
+                        var_name = node.args[0].id.lower()
+                        if any(pattern in var_name for pattern in ['equation', 'formula', 'math', 'expr', 'sum']):
+                            is_math = True
+                
+                # Choose the appropriate class
+                if is_math:
+                    node.func.id = 'MathTex'
+                    self.conversion_log.append("Converted Tex → MathTex (detected math content)")
+                else:
+                    # Keep as Tex for text content
+                    self.conversion_log.append("Kept Tex (detected text content)")
             
             # Detect Pi Creature usage
             if any(pattern in class_name for pattern in ['PiCreature', 'Randolph', 'Mortimer']):
@@ -238,18 +472,45 @@ class ManimASTTransformer(ast.NodeTransformer):
         return self.generic_visit(node)
     
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
-        """Handle class definitions, especially CONFIG dictionaries."""
+        """Handle class definitions, especially CONFIG dictionaries and parameterized scenes."""
         new_body = []
         config_dict = None
+        construct_method = None
+        has_init = False
         
-        # Look for CONFIG dictionary
+        # Check if this is a Scene subclass
+        is_scene = any(
+            (isinstance(base, ast.Name) and base.id == 'Scene') or
+            (isinstance(base, ast.Attribute) and base.attr == 'Scene')
+            for base in node.bases
+        )
+        
+        # Look for CONFIG dictionary and construct method
         for item in node.body:
             if isinstance(item, ast.Assign):
                 for target in item.targets:
                     if isinstance(target, ast.Name) and target.id == 'CONFIG':
                         config_dict = item.value
                         continue
-            new_body.append(item)
+            elif isinstance(item, ast.FunctionDef):
+                if item.name == 'construct' and is_scene:
+                    # Check if construct has parameters beyond self
+                    if len(item.args.args) > 1:
+                        construct_method = item
+                        # Track parameterized scene
+                        params = [arg.arg for arg in item.args.args[1:]]
+                        self.parameterized_scenes[node.name] = params
+                        self.conversion_log.append(f"Found parameterized scene {node.name} with params: {params}")
+                        continue
+                    else:
+                        new_body.append(item)
+                elif item.name == '__init__':
+                    has_init = True
+                    new_body.append(item)
+                else:
+                    new_body.append(item)
+            else:
+                new_body.append(item)
         
         # Convert CONFIG dict to class attributes
         if config_dict and isinstance(config_dict, ast.Dict):
@@ -263,6 +524,17 @@ class ManimASTTransformer(ast.NodeTransformer):
                         value=value
                     )
                     new_body.insert(0, attr_assign)
+        
+        # Handle parameterized construct method
+        if construct_method:
+            # Create __init__ method if it doesn't exist
+            if not has_init:
+                init_method = self._create_init_for_params(construct_method)
+                new_body.insert(0, init_method)
+            
+            # Modify construct to use self attributes
+            new_construct = self._convert_parameterized_construct(construct_method)
+            new_body.append(new_construct)
         
         node.body = new_body
         

@@ -85,7 +85,8 @@ class ManimConverter:
         # Define conversion mappings
         self.import_mappings = {
             r'from manimlib import \*': 'from manim import *',
-            r'from manimlib\.': 'from manim.',
+            # Special case: manimlib.imports doesn't exist in ManimCE
+            r'from manimlib\.imports import .*': 'from manim import *',
             r'import manimlib': 'import manim',
             r'from manim_imports_ext import \*': 'from manim import *',
         }
@@ -131,6 +132,10 @@ class ManimConverter:
             r'Randolph',
             r'Mortimer',
             r'get_students',
+            r'ThoughtBubble',
+            r'thought_bubble',
+            r'SpeechBubble',
+            r'speech_bubble',
         ]
         
     def setup_output_directory(self):
@@ -700,7 +705,7 @@ IMPORTANT: Make minimal changes to fix only the render error. Do not refactor or
                 f.write(prompt)
             
             # Run Claude with the fix prompt
-            cmd = ["claude"]
+            cmd = ["claude", "--dangerously-skip-permissions", "--model", "opus"]
             
             if self.verbose:
                 # Run with output streaming to console
