@@ -30,7 +30,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import existing components
 from scripts.manimce_conversion_utils import apply_all_conversions
 from scripts.manimce_precompile_validator import ManimCEPrecompileValidator
-from scripts.claude_api_helper import ClaudeErrorFixer
+
+# Conditional import for Claude error fixer (may not always be available)
+try:
+    from scripts.claude_api_helper import ClaudeErrorFixer
+    CLAUDE_AVAILABLE = True
+except ImportError:
+    logger.warning("Claude API helper not available - error fixing disabled")
+    CLAUDE_AVAILABLE = False
+    ClaudeErrorFixer = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -350,13 +358,19 @@ class EnhancedSceneConverter:
             self.render_validator = SceneRenderValidator(verbose=verbose, timeout=render_timeout)
         
         # Initialize Claude error fixer
-        if self.enable_claude_fixes:
+        if self.enable_claude_fixes and CLAUDE_AVAILABLE:
             self.claude_fixer = ClaudeErrorFixer(
                 verbose=verbose, 
                 timeout=render_timeout * 2,  # Give Claude more time
                 max_attempts=max_fix_attempts,
                 use_model_strategy=True  # Enable smart model selection
             )
+        elif self.enable_claude_fixes and not CLAUDE_AVAILABLE:
+            logger.warning("Claude fixes requested but not available - disabling")
+            self.enable_claude_fixes = False
+            self.claude_fixer = None
+        else:
+            self.claude_fixer = None
         
         logger.info(f"Enhanced Scene Converter initialized (render={enable_render_validation}, precompile={enable_precompile_validation}, claude={enable_claude_fixes})")
     
@@ -517,13 +531,49 @@ class EnhancedSceneConverter:
             # Imports
             parts.append("from manim import *")
             
-            # Add unique imports from dependencies
+            # Check if custom animations are needed and add them
+            custom_animation_classes = {'FlipThroughNumbers', 'DelayByOrder', 'ContinualAnimation'}
+            uses_custom_animations = False
+            
+            # Check if any custom animations are used in the converted content
+            for class_name in custom_animation_classes:
+                if class_name in converted_content:
+                    uses_custom_animations = True
+                    break
+            
+            # Also check in original dependencies
+            if dependencies.get('classes'):
+                for class_name in dependencies['classes'].keys():
+                    if class_name in custom_animation_classes:
+                        uses_custom_animations = True
+                        break
+            
+            if uses_custom_animations:
+                # Import custom animations inline to make snippet self-contained
+                parts.append("# Custom animation imports (inlined for self-containment)")
+                custom_animations_path = os.path.join(os.path.dirname(__file__), 'manimce_custom_animations.py')
+                try:
+                    with open(custom_animations_path, 'r') as f:
+                        custom_anim_content = f.read()
+                        # Extract only the class definitions we need
+                        custom_tree = ast.parse(custom_anim_content)
+                        for node in custom_tree.body:
+                            if isinstance(node, ast.ClassDef) and node.name in custom_animation_classes:
+                                parts.append(ast.unparse(node))
+                                parts.append("")
+                except Exception as e:
+                    logger.warning(f"Could not inline custom animations: {e}")
+                    parts.append("# NOTE: Custom animations may need to be imported manually")
+            
+            # Add unique imports from dependencies (excluding manimlib-related imports)
             seen_imports = {'from manim import *', 'import manim'}
             for import_node in dependencies.get('imports', []):
                 import_str = ast.unparse(import_node)
                 if (import_str not in seen_imports and 
                     'from manim import' not in import_str and 
-                    'import manim' not in import_str):
+                    'import manim' not in import_str and
+                    'manimlib' not in import_str and
+                    'manim_imports_ext' not in import_str):
                     seen_imports.add(import_str)
                     parts.append(import_str)
             
@@ -543,12 +593,23 @@ class EnhancedSceneConverter:
                     parts.append(ast.unparse(func_node))
                     parts.append("")
             
-            # Base classes (excluding standard Scene classes)
+            # Base classes (excluding standard Scene classes and custom animations)
             if dependencies.get('classes'):
-                parts.append("# Required classes")
-                for class_name, class_node in dependencies['classes'].items():
-                    parts.append(ast.unparse(class_node))
-                    parts.append("")
+                # Classes provided by our custom animations module - don't duplicate
+                custom_animation_classes = {
+                    'FlipThroughNumbers', 'DelayByOrder', 'ContinualAnimation'
+                }
+                
+                filtered_classes = {
+                    name: node for name, node in dependencies['classes'].items()
+                    if name not in custom_animation_classes
+                }
+                
+                if filtered_classes:
+                    parts.append("# Required classes")
+                    for class_name, class_node in filtered_classes.items():
+                        parts.append(ast.unparse(class_node))
+                        parts.append("")
             
             # The converted scene itself
             parts.append("# Main scene")
