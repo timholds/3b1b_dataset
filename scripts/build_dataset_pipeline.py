@@ -6,8 +6,7 @@ This script coordinates the entire pipeline:
 2. Clean and inline the matched code
 3. Convert from ManimGL to ManimCE
 4. Render videos (optional)
-5. Extract training snippets (future - see docs/TRAINING_SNIPPETS_PLAN.md)
-6. Compare with YouTube videos (future)
+5. Compare with YouTube videos (future)
 """
 
 import json
@@ -23,12 +22,11 @@ import sys
 sys.path.append(str(Path(__file__).parent))
 from claude_match_videos import ClaudeVideoMatcher
 from clean_matched_code import CodeCleaner
-from convert_manimgl_to_manimce import ManimConverter
+# ManimConverter removed - using integrated converter only
 from render_videos import VideoRenderer
 from manimce_precompile_validator import ManimCEPrecompileValidator
 from conversion_error_collector import collect_conversion_error, get_error_collector
 from generate_comparison_report import ComparisonReportGenerator
-from extract_training_snippets import SceneSnippetExtractor
 from scene_validator import SceneValidator
 
 class DatasetPipelineBuilder:
@@ -37,7 +35,7 @@ class DatasetPipelineBuilder:
                  render_max_attempts: int = 3, use_advanced_converter: bool = True,
                  enable_precompile_validation: bool = True, auto_fix_precompile: bool = True,
                  cleaning_mode: str = 'scene', conversion_mode: str = 'scene',
-                 use_integrated_converter: bool = True):
+                 parallel_render_workers: int = 1):
         self.base_dir = Path(base_dir)
         self.output_dir = self.base_dir / 'outputs'
         self.verbose = verbose
@@ -50,7 +48,6 @@ class DatasetPipelineBuilder:
         self.auto_fix_precompile = auto_fix_precompile
         self.cleaning_mode = cleaning_mode
         self.conversion_mode = conversion_mode
-        self.use_integrated_converter = use_integrated_converter
         
         # Intelligent hybrid parsing strategy
         self.intelligent_parsing = True  # Always use smart hybrid approach
@@ -58,7 +55,7 @@ class DatasetPipelineBuilder:
         # Initialize components
         self.matcher = ClaudeVideoMatcher(base_dir, verbose)
         self.cleaner = CodeCleaner(base_dir, verbose, timeout_multiplier=timeout_multiplier, max_retries=max_retries)
-        self.renderer = VideoRenderer(base_dir, verbose)
+        self.renderer = VideoRenderer(base_dir, verbose, parallel_render_workers)
         self.validator = ManimCEPrecompileValidator(verbose=verbose)
         self.scene_validator = SceneValidator(verbose=verbose)
         self.comparison_generator = ComparisonReportGenerator(base_dir, verbose)
@@ -113,7 +110,6 @@ class DatasetPipelineBuilder:
                 'cleaning': {'status': 'pending', 'stats': {}},
                 'conversion': {'status': 'pending', 'stats': {}},
                 'rendering': {'status': 'pending', 'stats': {}},
-                'snippet_extraction': {'status': 'pending', 'stats': {}}
             }
         }
         
@@ -407,6 +403,212 @@ class DatasetPipelineBuilder:
         
         return validation_summary
     
+    def optimize_cleaning_summary(self, summary: Dict) -> Dict:
+        """Optimize cleaning summary by removing redundant data and adding useful metrics."""
+        import re
+        from collections import defaultdict
+        
+        # Initialize aggregate statistics
+        aggregated_stats = {
+            'total_cleaning_time': 0,
+            'total_attempts': 0,
+            'scene_count': 0,
+            'complexity_distribution': defaultdict(int),
+            'validation_errors': defaultdict(int),
+            'scene_sizes': [],
+            'avg_time_per_scene': 0
+        }
+        
+        # Process results to remove redundant data and calculate metrics
+        optimized_results = {}
+        
+        for video_name, video_data in summary.get('results', {}).items():
+            if not isinstance(video_data, dict):
+                optimized_results[video_name] = video_data
+                continue
+                
+            # Create optimized video entry
+            optimized_video = {
+                'status': video_data.get('status', 'unknown'),
+                'reason': video_data.get('reason', '')
+            }
+            
+            # Process scene-by-scene results
+            if 'scenes' in video_data:
+                optimized_scenes = {}
+                total_video_time = 0
+                
+                for scene_name, scene_data in video_data.get('scenes', {}).items():
+                    if not isinstance(scene_data, dict):
+                        optimized_scenes[scene_name] = scene_data
+                        continue
+                        
+                    # Remove redundant file paths - they can be reconstructed
+                    elapsed_time = scene_data.get('elapsed_time', 0)
+                    optimized_scene = {
+                        'status': scene_data.get('status', 'unknown'),
+                        'time': round(elapsed_time, 2),
+                        'attempts': scene_data.get('attempts', 1),
+                        'validation': scene_data.get('validation', 'unknown')
+                    }
+                    
+                    # Add validation error summary if present
+                    if 'validation_error' in scene_data:
+                        error_msg = scene_data['validation_error']
+                        # Truncate long error messages
+                        optimized_scene['error_summary'] = error_msg[:100] + '...' if len(error_msg) > 100 else error_msg
+                        
+                        # Categorize error type
+                        error_type = 'other'
+                        if 'syntax' in error_msg.lower():
+                            error_type = 'syntax'
+                        elif 'import' in error_msg.lower():
+                            error_type = 'import'
+                        elif 'name' in error_msg.lower() and 'not defined' in error_msg.lower():
+                            error_type = 'undefined_name'
+                        aggregated_stats['validation_errors'][error_type] += 1
+                    
+                    # Update aggregate statistics
+                    aggregated_stats['total_cleaning_time'] += elapsed_time
+                    aggregated_stats['total_attempts'] += optimized_scene['attempts']
+                    aggregated_stats['scene_count'] += 1
+                    total_video_time += elapsed_time
+                    
+                    # Try to calculate scene metrics if file exists
+                    scene_file = self.output_dir / str(video_data.get('year', summary.get('year'))) / video_name / 'cleaned_scenes' / f'{scene_name}.py'
+                    if scene_file.exists():
+                        try:
+                            with open(scene_file, 'r') as f:
+                                content = f.read()
+                            lines = len(content.splitlines())
+                            size_kb = round(len(content) / 1024, 2)
+                            
+                            # Count animations and objects
+                            animations = len(re.findall(r'\.animate\(|\.play\(|self\.play\(', content))
+                            tex_objects = len(re.findall(r'(?:Tex|MathTex|Text)\s*\(', content))
+                            mobjects = len(re.findall(r'(?:Circle|Square|Dot|Arrow|Line|Rectangle|Polygon)\s*\(', content))
+                            
+                            optimized_scene['metrics'] = {
+                                'lines': lines,
+                                'size_kb': size_kb,
+                                'animations': animations,
+                                'complexity': 'simple' if lines < 50 else 'medium' if lines < 150 else 'complex'
+                            }
+                            
+                            aggregated_stats['complexity_distribution'][optimized_scene['metrics']['complexity']] += 1
+                            aggregated_stats['scene_sizes'].append(lines)
+                        except Exception:
+                            pass
+                    
+                    optimized_scenes[scene_name] = optimized_scene
+                
+                optimized_video['scenes'] = optimized_scenes
+                optimized_video['total_scenes'] = len(optimized_scenes)
+                optimized_video['cleaned_scenes'] = video_data.get('cleaned_scenes', 0)
+                optimized_video['failed_scenes'] = video_data.get('failed_scenes', 0)
+                optimized_video['total_time'] = round(total_video_time, 2)
+                optimized_video['combine_success'] = video_data.get('combine_success', False)
+                
+                # Add relationship summary if available
+                if 'relationship_analysis' in video_data:
+                    rel = video_data['relationship_analysis']
+                    optimized_video['relationships'] = {
+                        'total': rel.get('total_relationships', 0),
+                        'shared_objects': rel.get('shared_objects', 0)
+                    }
+            
+            optimized_results[video_name] = optimized_video
+        
+        # Calculate final aggregate statistics
+        if aggregated_stats['scene_count'] > 0:
+            aggregated_stats['avg_time_per_scene'] = round(
+                aggregated_stats['total_cleaning_time'] / aggregated_stats['scene_count'], 2
+            )
+            aggregated_stats['avg_scene_size'] = round(
+                sum(aggregated_stats['scene_sizes']) / len(aggregated_stats['scene_sizes'])
+            ) if aggregated_stats['scene_sizes'] else 0
+        
+        # Clean up temporary data
+        del aggregated_stats['scene_sizes']
+        aggregated_stats['total_cleaning_time'] = round(aggregated_stats['total_cleaning_time'], 2)
+        aggregated_stats['complexity_distribution'] = dict(aggregated_stats['complexity_distribution'])
+        aggregated_stats['validation_errors'] = dict(aggregated_stats['validation_errors'])
+        
+        # Create optimized summary
+        optimized_summary = {
+            'year': summary.get('year'),
+            'timestamp': summary.get('timestamp'),
+            'stats': summary.get('stats', {}),
+            'results': optimized_results,
+            'aggregated_stats': aggregated_stats
+        }
+        
+        # Add scene validation summary if present
+        if 'scene_validation' in summary:
+            optimized_summary['scene_validation'] = summary['scene_validation']
+        
+        return optimized_summary
+    
+    def generate_cleaning_report(self, summary: Dict, output_file: Optional[Path] = None) -> str:
+        """Generate a human-readable cleaning report from the optimized summary."""
+        agg_stats = summary.get('aggregated_stats', {})
+        stats = summary.get('stats', {})
+        
+        report = f"""
+Cleaning Summary Report - Year {summary.get('year')}
+{'=' * 60}
+
+Overall Statistics:
+- Total videos matched: {stats.get('total_matched', 0)}
+- Successfully cleaned: {stats.get('cleaned', 0)}
+- Failed: {stats.get('failed', 0)}
+- Skipped: {stats.get('skipped', 0)} (Low confidence: {stats.get('low_confidence', 0)}, No files: {stats.get('no_files', 0)})
+"""
+        
+        if stats.get('total_matched', 0) > 0:
+            success_rate = (stats.get('cleaned', 0) / stats['total_matched']) * 100
+            report += f"- Overall success rate: {success_rate:.1f}%\n"
+        
+        if agg_stats:
+            report += f"""
+Performance Metrics:
+- Total scenes processed: {agg_stats.get('scene_count', 0)}
+- Total cleaning time: {agg_stats.get('total_cleaning_time', 0):.1f} seconds
+- Average time per scene: {agg_stats.get('avg_time_per_scene', 0):.1f} seconds
+- Average scene size: {agg_stats.get('avg_scene_size', 0)} lines
+- Total retry attempts: {agg_stats.get('total_attempts', 0)}
+"""
+            
+            if agg_stats.get('complexity_distribution'):
+                report += "\nScene Complexity Distribution:\n"
+                for complexity, count in sorted(agg_stats['complexity_distribution'].items()):
+                    report += f"- {complexity.capitalize()}: {count} scenes\n"
+            
+            if agg_stats.get('validation_errors'):
+                report += "\nValidation Errors:\n"
+                for error_type, count in sorted(agg_stats['validation_errors'].items(), 
+                                              key=lambda x: x[1], reverse=True):
+                    report += f"- {error_type}: {count} occurrences\n"
+        
+        # Add problem videos section
+        problem_videos = []
+        for video_name, video_data in summary.get('results', {}).items():
+            if isinstance(video_data, dict) and video_data.get('status') == 'error':
+                problem_videos.append((video_name, video_data.get('reason', 'Unknown error')))
+        
+        if problem_videos:
+            report += f"\nProblem Videos ({len(problem_videos)}):\n"
+            for video, reason in problem_videos[:10]:  # Show first 10
+                report += f"- {video}: {reason}\n"
+            if len(problem_videos) > 10:
+                report += f"... and {len(problem_videos) - 10} more\n"
+        
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(report)
+        
+        return report
+    
     def run_cleaning_stage(self, year: int, force: bool = False, video_filter: Optional[List[str]] = None) -> Dict:
         """Run the code cleaning stage."""
         self.logger.info("=" * 60)
@@ -467,9 +669,39 @@ class DatasetPipelineBuilder:
             if scene_validation_summary['failed_videos'] > 0:
                 self.logger.warning(f"Scene validation found issues in {scene_validation_summary['failed_videos']} videos")
         
+        # Optimize the summary to remove redundant data and add useful metrics
+        summary = self.optimize_cleaning_summary(summary)
+        
+        # Save optimized summary
+        summary_file = self.output_dir / f'cleaning_summary_{year}.json'
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+        self.logger.info(f"Saved optimized cleaning summary to {summary_file}")
+        
+        # Generate and save human-readable report
+        report_file = self.logs_dir / f'cleaning_report_{year}.txt'
+        report = self.generate_cleaning_report(summary, report_file)
+        self.logger.info(f"Generated cleaning report at {report_file}")
+        
+        # Log key statistics
+        if 'aggregated_stats' in summary:
+            agg = summary['aggregated_stats']
+            self.logger.info(f"Cleaning Statistics:")
+            self.logger.info(f"  Total scenes processed: {agg['scene_count']}")
+            self.logger.info(f"  Average time per scene: {agg['avg_time_per_scene']}s")
+            self.logger.info(f"  Total cleaning time: {agg['total_cleaning_time']}s")
+            if agg.get('complexity_distribution'):
+                self.logger.info(f"  Complexity distribution: {dict(agg['complexity_distribution'])}")
+            if agg.get('validation_errors'):
+                self.logger.info(f"  Validation errors: {dict(agg['validation_errors'])}")
+        
         self.pipeline_state['stages']['cleaning']['status'] = 'completed'
         self.pipeline_state['stages']['cleaning']['end_time'] = datetime.now().isoformat()
         self.pipeline_state['stages']['cleaning']['stats'] = summary.get('stats', {})
+        
+        # Also add aggregated stats to pipeline state for final report
+        if 'aggregated_stats' in summary:
+            self.pipeline_state['stages']['cleaning']['aggregated_stats'] = summary['aggregated_stats']
         
         return summary
         
@@ -479,371 +711,11 @@ class DatasetPipelineBuilder:
         self.logger.info("STAGE 3: ManimCE Conversion")
         self.logger.info("=" * 60)
         
-        # Use integrated converter if enabled
-        if self.use_integrated_converter:
-            try:
-                from integrated_pipeline_converter import integrate_with_pipeline
-                self.logger.info("Using Integrated Converter (with dependency analysis and scene validation)")
-                return integrate_with_pipeline(self, year, video_filter, force)
-            except ImportError as e:
-                self.logger.warning(f"Integrated converter not available: {e}")
-                self.logger.warning("Falling back to standard conversion")
-        
-        self.pipeline_state['stages']['conversion']['status'] = 'running'
-        self.pipeline_state['stages']['conversion']['start_time'] = datetime.now().isoformat()
-        
-        self.logger.info(f"Conversion mode: {self.conversion_mode}")
-        
-        # Get list of cleaned files to convert
-        cleaned_files = []
-        year_dir = self.output_dir / str(year)
-        
-        # Initialize conversion results early to avoid UnboundLocalError
-        conversion_results = {
-            'total_files': 0,
-            'converted': 0,
-            'failed': 0,
-            'precompile_validated': 0,
-            'precompile_failed': 0,
-            'render_validated': 0,
-            'render_failed': 0,
-            'errors': []
-        }
-        
-        if not year_dir.exists():
-            self.logger.warning(f"No cleaned files found for year {year}")
-            self.pipeline_state['stages']['conversion']['status'] = 'skipped'
-            return {}
-            
-        # Load excluded videos
-        excluded_videos = self.load_excluded_videos()
-        
-        # Find all cleaned code files
-        for video_dir in year_dir.iterdir():
-            if video_dir.is_dir():
-                # Apply video filter if specified
-                if video_filter and video_dir.name not in video_filter:
-                    continue
-                    
-                cleaned_file = video_dir / 'cleaned_code.py'
-                match_file = video_dir / 'matches.json'
-                
-                if cleaned_file.exists() and match_file.exists():
-                    # Check if this video should be processed
-                    with open(match_file) as f:
-                        match_data = json.load(f)
-                        
-                    should_process, reason = self.should_process_video(
-                        video_dir.name, match_data, excluded_videos
-                    )
-                    
-                    if should_process:
-                        # Validate syntax of cleaned file before attempting conversion
-                        try:
-                            with open(cleaned_file, 'r') as f:
-                                code = f.read()
-                            compile(code, str(cleaned_file), 'exec')
-                            
-                            # Check if already converted
-                            manimce_file = video_dir / 'manimce_code.py'
-                            if not manimce_file.exists() or force:
-                                cleaned_files.append(cleaned_file)
-                        except SyntaxError as e:
-                            self.logger.warning(f"Skipping conversion for {video_dir.name}: Syntax error in cleaned file - {e}")
-                            conversion_results['errors'].append({
-                                'video': video_dir.name,
-                                'error': f"Syntax error in cleaned file: {e}",
-                                'stage': 'pre-conversion-validation'
-                            })
-                    else:
-                        self.logger.info(f"Skipping conversion for {video_dir.name}: {reason}")
-                        
-        self.logger.info(f"Found {len(cleaned_files)} files to convert")
-        
-        if not cleaned_files:
-            self.logger.info("No files need conversion")
-            self.pipeline_state['stages']['conversion']['status'] = 'skipped'
-            return {}
-            
-        # Note: Conversion now happens in-place within each video directory
-        # No separate conversion directory needed
-        
-        # Update total files count
-        conversion_results['total_files'] = len(cleaned_files)
-        
-        for cleaned_file in cleaned_files:
-            video_dir = cleaned_file.parent
-            manimce_file = video_dir / 'manimce_code.py'
-            
-            try:
-                self.logger.info(f"Converting {video_dir.name}")
-                
-                # Use scene-by-scene conversion if mode is 'scene'
-                if self.conversion_mode == 'scene':
-                    # Check if cleaned_scenes directory exists
-                    cleaned_scenes_dir = video_dir / 'cleaned_scenes'
-                    if cleaned_scenes_dir.exists() and any(cleaned_scenes_dir.glob('*.py')):
-                        self.logger.info(f"Using scene-by-scene conversion for {video_dir.name}")
-                        
-                        from convert_manimgl_to_manimce_scenes import SceneLevelConverter
-                        scene_converter = SceneLevelConverter(
-                            source_dir=str(video_dir),
-                            output_dir=str(video_dir),
-                            verbose=self.verbose,
-                            enable_render_validation=self.enable_render_validation,
-                            render_max_attempts=self.render_max_attempts,
-                            use_advanced_converter=self.use_advanced_converter,
-                            intelligent_parsing=self.intelligent_parsing
-                        )
-                        
-                        # Convert by scenes
-                        scene_result = scene_converter.convert_video_by_scenes(video_dir, max_workers=4)
-                        
-                        if scene_result.get('combine_success'):
-                            conversion_results['converted'] += 1
-                            self.logger.info(f"Successfully converted {video_dir.name} using scene mode")
-                            
-                            # Save conversion log for this video
-                            conversion_log = {
-                                'status': 'success',
-                                'mode': 'scene',
-                                'scene_results': scene_result
-                            }
-                            self.save_video_log(video_dir, 'conversion', conversion_log)
-                        else:
-                            conversion_results['failed'] += 1
-                            conversion_results['errors'].append({
-                                'file': str(cleaned_file),
-                                'error': f"Scene combination failed: {scene_result}"
-                            })
-                        
-                        # Skip monolithic conversion
-                        continue
-                    else:
-                        self.logger.warning(f"No cleaned scenes found for {video_dir.name}, falling back to monolithic")
-                
-                # Fall back to monolithic conversion
-                # Create converter instance for this file
-                converter = ManimConverter(
-                    source_dir=str(cleaned_file.parent),
-                    output_dir=str(manimce_file.parent),
-                    verbose=self.verbose,
-                    enable_render_validation=getattr(self, 'enable_render_validation', True),
-                    render_max_attempts=getattr(self, 'render_max_attempts', 3),
-                    use_advanced_converter=getattr(self, 'use_advanced_converter', True),
-                    intelligent_parsing=getattr(self, 'intelligent_parsing', True)
-                )
-                
-                # Convert the file
-                converted_content, was_converted = converter.convert_file(cleaned_file)
-                
-                # Write the converted code if successful
-                if was_converted:
-                    with open(manimce_file, 'w') as f:
-                        f.write(converted_content)
-                else:
-                    raise Exception("Conversion failed")
-                
-                # Run pre-compile validation if enabled
-                if self.enable_precompile_validation and was_converted:
-                    self.logger.info(f"Running pre-compile validation for {video_dir.name}")
-                    validation_report = self.validator.validate_file(str(manimce_file), content=converted_content)
-                    
-                    # Log validation results
-                    validation_log = {
-                        'precompile_valid': validation_report.is_valid,
-                        'errors': len(validation_report.errors),
-                        'warnings': len(validation_report.warnings),
-                        'validation_details': validation_report.to_dict()
-                    }
-                    self.save_video_log(video_dir, 'precompile_validation', validation_log)
-                    
-                    if not validation_report.is_valid:
-                        self.logger.warning(f"Pre-compile validation failed for {video_dir.name}: {len(validation_report.errors)} errors")
-                        # Log first few errors
-                        for error in validation_report.errors[:3]:
-                            self.logger.warning(f"  - Line {error.line_number}: {error.message}")
-                            if error.suggestion:
-                                self.logger.info(f"    Suggestion: {error.suggestion}")
-                        
-                        # Try automatic fixes if enabled
-                        if self.auto_fix_precompile and len(validation_report.errors) < 20:
-                            self.logger.info("Attempting automatic fixes...")
-                            fixed_content, applied_fixes = self.validator.apply_automatic_fixes(
-                                converted_content, validation_report
-                            )
-                            
-                            if applied_fixes:
-                                self.logger.info(f"Applied {len(applied_fixes)} automatic fixes:")
-                                for fix in applied_fixes:
-                                    self.logger.info(f"  - {fix}")
-                                
-                                # Re-validate after fixes
-                                re_validation = self.validator.validate_file(str(manimce_file), content=fixed_content)
-                                if re_validation.is_valid or len(re_validation.errors) < len(validation_report.errors):
-                                    self.logger.info("Automatic fixes improved validation")
-                                    # Write fixed content
-                                    with open(manimce_file, 'w') as f:
-                                        f.write(fixed_content)
-                                    converted_content = fixed_content
-                                    validation_report = re_validation
-                        
-                        # Collect validation errors for analysis
-                        for error in validation_report.errors:
-                            error_id = collect_conversion_error(
-                                file_path=str(manimce_file),
-                                error_message=error.message,
-                                error_type=f'precompile_{error.error_type}',
-                                code_context=f"Line {error.line_number}: {error.code_snippet or ''}",
-                                original_code=converted_content[:1000],
-                                converted_code=converted_content[:1000]
-                            )
-                        
-                        # Skip render validation if pre-compile failed badly
-                        if len(validation_report.errors) > 10:
-                            self.logger.warning(f"Too many pre-compile errors ({len(validation_report.errors)}), skipping render validation")
-                            converter.enable_render_validation = False
-                        
-                        if validation_report.is_valid:
-                            self.logger.info(f"✓ Pre-compile validation passed after fixes for {video_dir.name}")
-                            conversion_results['precompile_validated'] += 1
-                        else:
-                            conversion_results['precompile_failed'] += 1
-                    else:
-                        self.logger.info(f"✓ Pre-compile validation passed for {video_dir.name}")
-                        conversion_results['precompile_validated'] += 1
-                
-                # Save conversion log for this video
-                conversion_log = {
-                    'status': 'success',
-                    'issues': converter.issues if hasattr(converter, 'issues') else [],
-                    'conversion_log': converter.conversion_log if hasattr(converter, 'conversion_log') else ''
-                }
-                self.save_video_log(video_dir, 'conversion', conversion_log)
-                
-                # Validate the converted file
-                if manimce_file.exists():
-                    with open(manimce_file) as f:
-                        content = f.read()
-                        
-                    if len(content) > 100:  # Basic check
-                        conversion_results['converted'] += 1
-                        self.logger.info(f"Successfully converted {video_dir.name}")
-                        
-                        # Check render validation results from converter
-                        render_issues = [i for i in converter.issues if i.get('issue') == 'render_failed']
-                        if render_issues:
-                            conversion_results['render_failed'] += 1
-                            self.logger.warning(f"Render validation failed for {video_dir.name}")
-                        else:
-                            # Check if render validation was performed
-                            if self.enable_render_validation and "✓ Render validation passed" in converter.conversion_log:
-                                conversion_results['render_validated'] += 1
-                                self.logger.info(f"✓ Render validation passed for {video_dir.name}")
-                    else:
-                        conversion_results['failed'] += 1
-                        conversion_results['errors'].append({
-                            'file': str(cleaned_file),
-                            'error': 'Converted file is too small'
-                        })
-                else:
-                    conversion_results['failed'] += 1
-                    conversion_results['errors'].append({
-                        'file': str(cleaned_file),
-                        'error': 'Converted file not created'
-                    })
-                    
-            except Exception as e:
-                self.logger.error(f"Failed to convert {video_dir.name}: {e}")
-                conversion_results['failed'] += 1
-                conversion_results['errors'].append({
-                    'file': str(cleaned_file),
-                    'error': str(e)
-                })
-                
-                # Collect the error for pattern analysis
-                collect_conversion_error(
-                    file_path=str(cleaned_file),
-                    error_message=str(e),
-                    error_type=type(e).__name__,
-                    code_context=f"Conversion failed for {video_dir.name}"
-                )
-                
-                # Save error log for this video
-                error_log = {
-                    'status': 'failed',
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                }
-                self.save_video_log(video_dir, 'conversion', error_log)
-                
-            # Small delay to avoid overwhelming the system
-            time.sleep(0.5)
-            
-        # Run sanity check on all converted files if we converted any
-        if conversion_results['converted'] > 0 and self.verbose:
-            self.logger.info("Running Claude sanity check on all converted files...")
-            # Create a temporary converter to run sanity check
-            sanity_converter = ManimConverter(
-                source_dir=str(self.output_dir / str(year)),
-                output_dir=str(self.output_dir / str(year)),
-                verbose=self.verbose
-            )
-            # Populate the issues from our conversions
-            sanity_converter.issues = []
-            for error in conversion_results['errors']:
-                sanity_converter.issues.append({
-                    'file': error['file'],
-                    'issue': 'conversion_error',
-                    'description': error['error']
-                })
-            
-            # Run sanity check
-            sanity_result = sanity_converter.run_claude_sanity_check()
-            if sanity_result['status'] == 'completed':
-                self.logger.info("Claude sanity check completed successfully")
-            else:
-                self.logger.error(f"Claude sanity check failed: {sanity_result.get('error', 'Unknown error')}")
-        
-        # Generate error pattern analysis if we had failures
-        if conversion_results['failed'] > 0:
-            from conversion_error_collector import get_error_collector
-            collector = get_error_collector()
-            error_summary = collector.generate_error_summary()
-            
-            # Save error analysis
-            error_analysis_file = self.output_dir / 'logs' / f'conversion_error_analysis_{year}.md'
-            with open(error_analysis_file, 'w') as f:
-                f.write(error_summary)
-            
-            self.logger.info(f"Error analysis saved to {error_analysis_file}")
-        
-        # Save conversion summary
-        conversion_summary = {
-            'year': year,
-            'timestamp': datetime.now().isoformat(),
-            'results': conversion_results
-        }
-        
-        summary_file = self.output_dir / f'conversion_summary_{year}.json'
-        with open(summary_file, 'w') as f:
-            json.dump(conversion_summary, f, indent=2)
-            
-        self.pipeline_state['stages']['conversion']['status'] = 'completed'
-        self.pipeline_state['stages']['conversion']['end_time'] = datetime.now().isoformat()
-        self.pipeline_state['stages']['conversion']['stats'] = conversion_results
-        
-        self.logger.info(f"Conversion complete: {conversion_results['converted']} succeeded, "
-                        f"{conversion_results['failed']} failed")
-        if self.enable_precompile_validation:
-            self.logger.info(f"Pre-compile validation: {conversion_results['precompile_validated']} passed, "
-                            f"{conversion_results['precompile_failed']} failed")
-        if self.enable_render_validation:
-            self.logger.info(f"Render validation: {conversion_results['render_validated']} passed, "
-                            f"{conversion_results['render_failed']} failed")
-        
-        return conversion_summary
-        
+        # Always use integrated converter
+        from integrated_pipeline_converter import integrate_with_pipeline
+        self.logger.info("Using Integrated Converter (with dependency analysis and scene validation)")
+        return integrate_with_pipeline(self, year, video_filter, force)
+
     def run_rendering_stage(self, year: int, quality: str = 'preview', 
                            limit: Optional[int] = None, scenes_limit: Optional[int] = None,
                            video_filter: Optional[List[str]] = None, force: bool = False) -> Dict:
@@ -907,84 +779,6 @@ class DatasetPipelineBuilder:
             
         return summary
     
-    def run_snippet_extraction_stage(self, year: int, video_filter: Optional[List[str]] = None):
-        """Stage 5: Extract self-contained training snippets from ManimCE code."""
-        self.logger.info("=" * 60)
-        self.logger.info("STAGE 5: SNIPPET EXTRACTION")
-        self.logger.info("=" * 60)
-        
-        self.pipeline_state['stages']['snippet_extraction'] = {
-            'status': 'running',
-            'start_time': datetime.now().isoformat()
-        }
-        
-        year_dir = self.output_dir / str(year)
-        if not year_dir.exists():
-            self.logger.error(f"Year directory not found: {year_dir}")
-            self.pipeline_state['stages']['snippet_extraction']['status'] = 'failed'
-            return {'error': 'Year directory not found'}
-        
-        # Find videos to process
-        if video_filter:
-            video_dirs = []
-            for video_name in video_filter:
-                video_dir = year_dir / video_name
-                if video_dir.exists():
-                    video_dirs.append(video_dir)
-                else:
-                    self.logger.warning(f"Video directory not found: {video_dir}")
-        else:
-            video_dirs = [d for d in year_dir.iterdir() if d.is_dir()]
-        
-        total_snippets = 0
-        successful_videos = 0
-        failed_videos = []
-        
-        for video_dir in sorted(video_dirs):
-            manimce_path = video_dir / "manimce_code.py"
-            
-            if not manimce_path.exists():
-                self.logger.warning(f"No manimce_code.py found in {video_dir.name}, skipping")
-                continue
-            
-            self.logger.info(f"Extracting snippets from {video_dir.name}...")
-            
-            try:
-                extractor = SceneSnippetExtractor(str(manimce_path))
-                summary = extractor.save_snippets(self.output_dir)
-                
-                total_snippets += summary['total_scenes']
-                successful_videos += 1
-                
-                self.logger.info(f"Successfully extracted {summary['total_scenes']} snippets "
-                               f"({summary['validated_scenes']} validated)")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to extract snippets from {video_dir.name}: {e}")
-                failed_videos.append(video_dir.name)
-                continue
-        
-        # Update pipeline state
-        self.pipeline_state['stages']['snippet_extraction']['status'] = 'completed'
-        self.pipeline_state['stages']['snippet_extraction']['end_time'] = datetime.now().isoformat()
-        self.pipeline_state['stages']['snippet_extraction']['stats'] = {
-            'total_videos_processed': successful_videos,
-            'failed_videos': len(failed_videos),
-            'total_snippets_extracted': total_snippets
-        }
-        
-        self.logger.info(f"\nSnippet extraction complete!")
-        self.logger.info(f"Processed {successful_videos} videos")
-        self.logger.info(f"Total snippets extracted: {total_snippets}")
-        if failed_videos:
-            self.logger.warning(f"Failed videos: {failed_videos}")
-        
-        return {
-            'successful_videos': successful_videos,
-            'failed_videos': failed_videos,
-            'total_snippets': total_snippets
-        }
-        
     def archive_old_reports(self, year: int):
         """Archive old pipeline report JSON files, keeping only the latest."""
         # Find all existing pipeline report JSON files for this year
@@ -1043,7 +837,19 @@ Stats: {json.dumps(self.pipeline_state['stages']['matching']['stats'], indent=2)
 Stage 2: Code Cleaning (Mode: {self.cleaning_mode})
 ----------------------
 Status: {self.pipeline_state['stages']['cleaning']['status']}
-Stats: {json.dumps(self.pipeline_state['stages']['cleaning']['stats'], indent=2)}
+Stats: {json.dumps(self.pipeline_state['stages']['cleaning']['stats'], indent=2)}"""
+        
+        # Add aggregated cleaning stats if available
+        if 'aggregated_stats' in self.pipeline_state['stages']['cleaning']:
+            agg = self.pipeline_state['stages']['cleaning']['aggregated_stats']
+            report_text += f"""
+Aggregated Cleaning Metrics:
+  - Total scenes: {agg.get('scene_count', 0)}
+  - Avg time/scene: {agg.get('avg_time_per_scene', 0):.1f}s
+  - Complexity: {json.dumps(agg.get('complexity_distribution', {}), indent=4)}
+  - Errors: {json.dumps(agg.get('validation_errors', {}), indent=4)}"""
+        
+        report_text += f"""
 
 Stage 3: ManimCE Conversion (Mode: {self.conversion_mode})
 ---------------------------
@@ -1054,11 +860,6 @@ Stage 4: Video Rendering
 ------------------------
 Status: {self.pipeline_state['stages']['rendering']['status']}
 Stats: {json.dumps(self.pipeline_state['stages']['rendering']['stats'], indent=2)}
-
-Stage 5: Snippet Extraction
----------------------------
-Status: {self.pipeline_state['stages']['snippet_extraction']['status']}
-Stats: {json.dumps(self.pipeline_state['stages']['snippet_extraction']['stats'], indent=2)}
 
 Total Duration: {self.pipeline_state.get('duration_seconds', 0):.1f} seconds
 
@@ -1083,7 +884,7 @@ Output Locations:
         
     def run_full_pipeline(self, year: int = 2015, skip_matching: bool = False,
                          skip_cleaning: bool = False, skip_conversion: bool = False,
-                         skip_rendering: bool = False, skip_snippets: bool = False,
+                         skip_rendering: bool = False,
                          force_match: bool = False, force_clean: bool = False, 
                          force_convert: bool = False, force_render: bool = False,
                          render_quality: str = 'preview',
@@ -1098,14 +899,25 @@ Output Locations:
         self.logger.info(f"Skip cleaning: {skip_cleaning}")
         self.logger.info(f"Skip conversion: {skip_conversion}")
         self.logger.info(f"Skip rendering: {skip_rendering}")
-        self.logger.info(f"Skip snippets: {skip_snippets}")
         if video_filter:
             self.logger.info(f"Video filter: {video_filter}")
+        
+        # Count total stages to run
+        stages_to_run = sum([
+            not skip_matching,
+            not skip_cleaning,
+            not skip_conversion,
+            not skip_rendering
+        ])
+        stages_completed = 0
         
         try:
             # Stage 1: Matching
             if not skip_matching:
                 self.run_matching_stage(year, force=force_match, video_filter=video_filter)
+                stages_completed += 1
+                if self.verbose and stages_to_run > 1:
+                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
                 self.logger.info("Skipping matching stage")
                 self.pipeline_state['stages']['matching']['status'] = 'skipped'
@@ -1113,6 +925,9 @@ Output Locations:
             # Stage 2: Cleaning
             if not skip_cleaning:
                 self.run_cleaning_stage(year, force=force_clean, video_filter=video_filter)
+                stages_completed += 1
+                if self.verbose and stages_to_run > 1:
+                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
                 self.logger.info("Skipping cleaning stage")
                 self.pipeline_state['stages']['cleaning']['status'] = 'skipped'
@@ -1120,6 +935,9 @@ Output Locations:
             # Stage 3: Conversion
             if not skip_conversion:
                 self.run_conversion_stage(year, force=force_convert, video_filter=video_filter)
+                stages_completed += 1
+                if self.verbose and stages_to_run > 1:
+                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
                 self.logger.info("Skipping conversion stage")
                 self.pipeline_state['stages']['conversion']['status'] = 'skipped'
@@ -1129,15 +947,12 @@ Output Locations:
                 self.run_rendering_stage(year, quality=render_quality, 
                                        limit=render_limit, scenes_limit=render_scenes_limit,
                                        video_filter=video_filter, force=force_render)
+                stages_completed += 1
+                if self.verbose and stages_to_run > 1:
+                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
                 self.logger.info("Skipping rendering stage")
                 self.pipeline_state['stages']['rendering']['status'] = 'skipped'
-                
-            # Stage 5: Snippet Extraction
-            if not skip_snippets:
-                self.run_snippet_extraction_stage(year, video_filter=video_filter)
-            else:
-                self.logger.info("Skipping snippet extraction stage")
                 
         except Exception as e:
             self.logger.error(f"Pipeline failed: {e}")
@@ -1208,18 +1023,12 @@ def main():
                         help='Run only pre-compile validation without rendering')
     parser.add_argument('--no-auto-fix', action='store_true',
                         help='Disable automatic fixes during pre-compile validation')
-    parser.add_argument('--extract-snippets', action='store_true',
-                        help='Extract self-contained training snippets from converted ManimCE code')
-    parser.add_argument('--snippet-only', action='store_true',
-                        help='Run only the snippet extraction stage')
     parser.add_argument('--cleaning-mode', choices=['monolithic', 'scene'], default='scene',
                         help='Cleaning mode: scene-by-scene (default) or monolithic')
     parser.add_argument('--conversion-mode', choices=['monolithic', 'scene'], default='scene',
                         help='Conversion mode: scene-by-scene (default) or monolithic')
-    parser.add_argument('--use-integrated-converter', action='store_true', default=True,
-                        help='Use integrated converter with dependency analysis and scene validation (default: True)')
-    parser.add_argument('--no-integrated-converter', action='store_true',
-                        help='Disable integrated converter and use standard conversion')
+    parser.add_argument('--parallel-render', type=int, default=1,
+                        help='Number of parallel workers for rendering scenes (default: 1)')
     
     args = parser.parse_args()
     
@@ -1241,12 +1050,6 @@ def main():
         args.skip_cleaning = True
         args.skip_conversion = True
         args.render = True  # Force rendering on for render-only mode
-    elif args.snippet_only:
-        args.skip_matching = True
-        args.skip_cleaning = True
-        args.skip_conversion = True
-        args.render = False
-        args.extract_snippets = True
     
     # Handle precompile-only flag
     if args.precompile_only:
@@ -1259,8 +1062,8 @@ def main():
         args.render_limit = args.render_limit or 5
         args.render_scenes_limit = args.render_scenes_limit or 2
     
-    # Handle integrated converter flag
-    use_integrated = args.use_integrated_converter and not args.no_integrated_converter
+    # Integrated converter is now always used
+    use_integrated = True
     
     # Create pipeline builder
     base_dir = Path(__file__).parent.parent
@@ -1274,7 +1077,7 @@ def main():
                                     auto_fix_precompile=not args.no_auto_fix,
                                     cleaning_mode=args.cleaning_mode,
                                     conversion_mode=args.conversion_mode,
-                                    use_integrated_converter=use_integrated)
+                                    parallel_render_workers=args.parallel_render)
     
     # Run pipeline
     builder.run_full_pipeline(
@@ -1283,7 +1086,6 @@ def main():
         skip_cleaning=args.skip_cleaning,
         skip_conversion=args.skip_conversion,
         skip_rendering=not args.render,  # Invert the logic: render flag enables rendering
-        skip_snippets=not args.extract_snippets,  # Invert the logic: extract_snippets flag enables extraction
         force_match=args.force_match,
         force_clean=args.force_clean,
         force_convert=args.force_convert,

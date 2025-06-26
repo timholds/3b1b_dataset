@@ -14,12 +14,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class VideoRenderer:
-    def __init__(self, base_dir: str, verbose: bool = False):
+    def __init__(self, base_dir: str, verbose: bool = False, parallel_workers: int = 1):
         self.base_dir = Path(base_dir)
         self.output_base_dir = self.base_dir / 'outputs'
         self.verbose = verbose
+        self.parallel_workers = parallel_workers
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -249,26 +251,68 @@ class VideoRenderer:
             'total_duration': 0
         }
         
-        for i, scene_name in enumerate(scenes):
-            # Create output filename with title and scene
-            output_filename = f"{safe_title}_{video_id}_{scene_name}.{self.quality_configs[quality]['format']}"
-            output_path = output_dir / output_filename
+        if self.parallel_workers > 1 and len(scenes) > 1:
+            # Parallel rendering
+            self.logger.info(f"Rendering {len(scenes)} scenes in parallel with {self.parallel_workers} workers")
             
-            self.logger.info(f"Rendering scene {i+1}/{len(scenes)}: {scene_name}")
-            
-            scene_result = self.render_single_scene(
-                code_file, scene_name, output_path, quality
-            )
-            
-            scene_result['scene_name'] = scene_name
-            results['total_duration'] += scene_result.get('duration', 0)
-            
-            if scene_result['status'] == 'success':
-                results['rendered_scenes'].append(scene_result)
-                self.logger.info(f"✓ Rendered {scene_name} successfully")
-            else:
-                results['failed_scenes'].append(scene_result) 
-                self.logger.error(f"✗ Failed to render {scene_name}: {scene_result.get('error')}")
+            with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
+                # Prepare all scene rendering tasks
+                future_to_scene = {}
+                
+                for i, scene_name in enumerate(scenes):
+                    output_filename = f"{safe_title}_{video_id}_{scene_name}.{self.quality_configs[quality]['format']}"
+                    output_path = output_dir / output_filename
+                    
+                    future = executor.submit(
+                        self.render_single_scene,
+                        code_file, scene_name, output_path, quality
+                    )
+                    future_to_scene[future] = (i, scene_name)
+                
+                # Process completed renders as they finish
+                for future in as_completed(future_to_scene):
+                    i, scene_name = future_to_scene[future]
+                    
+                    try:
+                        scene_result = future.result()
+                        scene_result['scene_name'] = scene_name
+                        results['total_duration'] += scene_result.get('duration', 0)
+                        
+                        if scene_result['status'] == 'success':
+                            results['rendered_scenes'].append(scene_result)
+                            self.logger.info(f"✓ [{i+1}/{len(scenes)}] Rendered {scene_name} successfully")
+                        else:
+                            results['failed_scenes'].append(scene_result)
+                            self.logger.error(f"✗ [{i+1}/{len(scenes)}] Failed to render {scene_name}: {scene_result.get('error')}")
+                    except Exception as e:
+                        self.logger.error(f"✗ [{i+1}/{len(scenes)}] Exception rendering {scene_name}: {e}")
+                        results['failed_scenes'].append({
+                            'scene_name': scene_name,
+                            'status': 'error',
+                            'error': str(e)
+                        })
+        else:
+            # Sequential rendering (original code)
+            for i, scene_name in enumerate(scenes):
+                # Create output filename with title and scene
+                output_filename = f"{safe_title}_{video_id}_{scene_name}.{self.quality_configs[quality]['format']}"
+                output_path = output_dir / output_filename
+                
+                self.logger.info(f"Rendering scene {i+1}/{len(scenes)}: {scene_name}")
+                
+                scene_result = self.render_single_scene(
+                    code_file, scene_name, output_path, quality
+                )
+                
+                scene_result['scene_name'] = scene_name
+                results['total_duration'] += scene_result.get('duration', 0)
+                
+                if scene_result['status'] == 'success':
+                    results['rendered_scenes'].append(scene_result)
+                    self.logger.info(f"✓ Rendered {scene_name} successfully")
+                else:
+                    results['failed_scenes'].append(scene_result) 
+                    self.logger.error(f"✗ Failed to render {scene_name}: {scene_result.get('error')}")
                 
         # Calculate summary
         results['status'] = 'partial' if results['failed_scenes'] else 'success'
@@ -458,6 +502,8 @@ def main():
                         help='Render a specific video by ID')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Enable verbose output')
+    parser.add_argument('--parallel-render', type=int, default=1,
+                        help='Number of parallel workers for rendering scenes (default: 1)')
     
     args = parser.parse_args()
     
@@ -469,7 +515,7 @@ def main():
     
     # Create renderer
     base_dir = Path(__file__).parent.parent
-    renderer = VideoRenderer(base_dir, verbose=args.verbose)
+    renderer = VideoRenderer(base_dir, verbose=args.verbose, parallel_workers=args.parallel_render)
     
     if args.video:
         # Render single video

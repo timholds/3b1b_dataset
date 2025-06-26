@@ -16,10 +16,10 @@ MODEL_STRATEGY = {
     "complex_render_fix": "opus",              # Fixing complex render errors
     
     # Mechanical/pattern-based tasks - Sonnet is fine
-    "clean_code": "claude-3-5-sonnet-20241022",             # Code cleaning, import inlining
-    "simple_syntax_fix": "claude-3-5-sonnet-20241022",      # Basic syntax errors
-    "precompile_fix": "claude-3-5-sonnet-20241022",         # Import/attribute fixes
-    "retry_render_fix": "claude-3-5-sonnet-20241022",       # Subsequent fix attempts
+    "clean_code": "sonnet",             # Code cleaning, import inlining
+    "simple_syntax_fix": "sonnet",      # Basic syntax errors
+    "precompile_fix": "sonnet",         # Import/attribute fixes
+    "retry_render_fix": "sonnet",       # Subsequent fix attempts
 }
 
 def get_model_for_task(task_type: str, context: Optional[Dict] = None) -> str:
@@ -42,7 +42,7 @@ def get_model_for_task(task_type: str, context: Optional[Dict] = None) -> str:
         if attempt == 1:
             return MODEL_STRATEGY.get("initial_conversion", "opus")
         else:
-            return MODEL_STRATEGY.get("retry_render_fix", "claude-3-5-sonnet-20241022")
+            return MODEL_STRATEGY.get("retry_render_fix", "sonnet")
     
     # Large files might need Opus even for simple tasks
     if context and context.get("file_size", 0) > 100000:  # 100KB

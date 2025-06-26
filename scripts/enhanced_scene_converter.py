@@ -28,7 +28,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import existing components
-from scripts.extract_training_snippets import DependencyAnalyzer, SceneSnippetExtractor
 from scripts.manimce_conversion_utils import apply_all_conversions
 from scripts.manimce_precompile_validator import ManimCEPrecompileValidator
 from scripts.claude_api_helper import ClaudeErrorFixer
@@ -36,6 +35,198 @@ from scripts.claude_api_helper import ClaudeErrorFixer
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+class FunctionDependencyVisitor(ast.NodeVisitor):
+    """Helper visitor to analyze function bodies for dependencies."""
+    
+    def __init__(self):
+        self.used_names = set()
+        self.used_functions = set()
+    
+    def visit_Name(self, node: ast.Name):
+        if isinstance(node.ctx, ast.Load):
+            self.used_names.add(node.id)
+        self.generic_visit(node)
+    
+    def visit_Call(self, node: ast.Call):
+        if isinstance(node.func, ast.Name):
+            self.used_functions.add(node.func.id)
+        self.generic_visit(node)
+
+
+class DependencyAnalyzer(ast.NodeVisitor):
+    """Analyze AST to find dependencies for a given scene."""
+    
+    def __init__(self, module_ast: ast.Module, scene_name: str):
+        self.module_ast = module_ast
+        self.scene_name = scene_name
+        self.scene_node = None
+        
+        # Dependencies to track
+        self.used_functions: Set[str] = set()
+        self.used_names: Set[str] = set()
+        self.used_classes: Set[str] = set()
+        self.used_imports: Set[str] = set()
+        
+        # Module-level definitions
+        self.module_functions: Dict[str, ast.FunctionDef] = {}
+        self.module_classes: Dict[str, ast.ClassDef] = {}
+        self.module_constants: Dict[str, ast.AST] = {}
+        self.module_imports: List[ast.AST] = []
+        
+        # Current context
+        self.current_class = None
+        self.in_scene = False
+        
+        # Analyze module first
+        self._analyze_module()
+        
+    def _analyze_module(self):
+        """Extract module-level definitions."""
+        for node in self.module_ast.body:
+            if isinstance(node, ast.FunctionDef):
+                self.module_functions[node.name] = node
+            elif isinstance(node, ast.ClassDef):
+                self.module_classes[node.name] = node
+                if node.name == self.scene_name:
+                    self.scene_node = node
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                self.module_imports.append(node)
+            elif isinstance(node, ast.Assign):
+                # Track module-level constants
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.module_constants[target.id] = node
+    
+    def analyze_scene(self) -> Dict[str, Any]:
+        """Analyze the scene and return its dependencies."""
+        if not self.scene_node:
+            return {}
+        
+        # Find base classes
+        base_classes = []
+        for base in self.scene_node.bases:
+            if isinstance(base, ast.Name):
+                base_classes.append(base.id)
+        
+        # Visit the scene node
+        self.in_scene = True
+        self.visit(self.scene_node)
+        self.in_scene = False
+        
+        # Collect all dependencies
+        dependencies = {
+            'functions': self._collect_function_dependencies(),
+            'classes': self._collect_class_dependencies(base_classes),
+            'constants': self._collect_constant_dependencies(),
+            'imports': self._collect_import_dependencies(),
+            'base_classes': base_classes
+        }
+        
+        return dependencies
+    
+    def visit_Call(self, node: ast.Call):
+        """Track function calls."""
+        if self.in_scene:
+            if isinstance(node.func, ast.Name):
+                self.used_functions.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                # Track method calls that might be module functions
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == 'self':
+                    # Skip self.method() calls
+                    pass
+                else:
+                    # Could be a function from an imported module
+                    self.used_functions.add(ast.unparse(node.func))
+        
+        self.generic_visit(node)
+    
+    def visit_Name(self, node: ast.Name):
+        """Track name references."""
+        if self.in_scene and isinstance(node.ctx, ast.Load):
+            self.used_names.add(node.id)
+        
+        self.generic_visit(node)
+    
+    def _collect_function_dependencies(self) -> Dict[str, ast.FunctionDef]:
+        """Collect all functions used by the scene."""
+        result = {}
+        to_process = list(self.used_functions)
+        processed = set()
+        
+        while to_process:
+            func_name = to_process.pop(0)
+            if func_name in processed or func_name not in self.module_functions:
+                continue
+                
+            processed.add(func_name)
+            result[func_name] = self.module_functions[func_name]
+            
+            # Analyze function body for more dependencies
+            func_analyzer = FunctionDependencyVisitor()
+            func_analyzer.visit(self.module_functions[func_name])
+            
+            # Add newly found dependencies
+            for name in func_analyzer.used_names:
+                if name in self.module_functions and name not in processed:
+                    to_process.append(name)
+                # Also track constants used by functions
+                if name in self.module_constants:
+                    self.used_names.add(name)
+        
+        return result
+    
+    def _collect_class_dependencies(self, base_classes: List[str]) -> Dict[str, ast.ClassDef]:
+        """Collect all classes used by the scene."""
+        result = {}
+        to_process = list(base_classes) + [name for name in self.used_names if name in self.module_classes]
+        processed = set()
+        
+        while to_process:
+            class_name = to_process.pop(0)
+            if class_name in processed or class_name not in self.module_classes or class_name == 'Scene':
+                continue
+                
+            processed.add(class_name)
+            result[class_name] = self.module_classes[class_name]
+            
+            # Analyze class body for dependencies
+            class_analyzer = FunctionDependencyVisitor()
+            class_analyzer.visit(self.module_classes[class_name])
+            
+            # Add dependencies found in class
+            for name in class_analyzer.used_names:
+                if name in self.module_classes and name not in processed:
+                    to_process.append(name)
+                # Track constants used by classes
+                if name in self.module_constants:
+                    self.used_names.add(name)
+            
+            # Check base classes of this class
+            class_node = self.module_classes[class_name]
+            for base in class_node.bases:
+                if isinstance(base, ast.Name) and base.id in self.module_classes:
+                    if base.id not in processed:
+                        to_process.append(base.id)
+        
+        return result
+    
+    def _collect_constant_dependencies(self) -> Dict[str, ast.AST]:
+        """Collect all constants used by the scene."""
+        result = {}
+        
+        for name in self.used_names:
+            if name in self.module_constants:
+                result[name] = self.module_constants[name]
+        
+        return result
+    
+    def _collect_import_dependencies(self) -> List[ast.AST]:
+        """Determine which imports are needed."""
+        # For now, include all imports (conservative approach)
+        # TODO: Smart import filtering based on usage
+        return self.module_imports
 
 
 class SceneRenderValidator:
@@ -314,7 +505,7 @@ class EnhancedSceneConverter:
                                      dependencies: Dict[str, Any], video_name: str) -> str:
         """Create a self-contained snippet with all dependencies."""
         try:
-            # Use existing snippet creation logic from SceneSnippetExtractor
+            # Create self-contained snippet with all dependencies
             parts = []
             
             # Header with metadata

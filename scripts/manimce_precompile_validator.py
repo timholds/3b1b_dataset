@@ -164,8 +164,25 @@ class ManimCEPrecompileValidator:
         }
         
         self.valid_scenes = {
+            # Core scene types
             'Scene', 'MovingCameraScene', 'ZoomedScene', 'ThreeDScene',
-            'SpecialThreeDScene', 'VectorScene', 'LinearTransformationScene'
+            'SpecialThreeDScene', 'InteractiveScene',
+            
+            # Mathematical scene types
+            'GraphScene', 'NumberLineScene', 'LinearTransformationScene',
+            'VectorScene', 'ComplexTransformationScene', 'SampleSpaceScene',
+            'ReconfigurableScene', 'FourierCirclesScene',
+            
+            # Educational/Character scene types  
+            'TeacherStudentsScene', 'PiCreatureScene', 'ExternallyAnimatedScene',
+            'SceneFromVideo', 'OpeningQuoteScene', 'TitleCardScene', 'EndScene',
+            
+            # Common specialized scenes
+            'VectorFieldScene', 'TransformScene2D', 'FunctionGraphScene',
+            'RearrangeEquation', 'HistogramScene', 'NetworkScene',
+            
+            # Note: This is not exhaustive - any class ending with 'Scene' 
+            # should be considered valid for scene detection purposes
         }
         
         # Deprecated or removed items

@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import time
 
+# Import model strategy
+from model_strategy import get_model_for_task
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -144,10 +147,13 @@ class ClaudeErrorFixer:
         if self.use_model_strategy:
             try:
                 from model_strategy import get_model_for_task
+                original_model = self.model
                 self.model = get_model_for_task("fix_render_error", {
                     "attempt_number": attempt_number,
                     "error_complexity": "complex" if "TypeError" in error_message else "simple"
                 })
+                if self.model != original_model:
+                    logger.info(f"Switched model from {original_model} to {self.model} for attempt {attempt_number}")
             except ImportError:
                 pass  # Keep default model
         
@@ -273,7 +279,11 @@ class ClaudeErrorFixer:
             "Make ONLY the changes needed to fix the render error",
             "Do not refactor or improve code style",
             "Preserve all functionality while fixing the error",
-            "Add comments explaining any non-obvious fixes"
+            "Add comments explaining any non-obvious fixes",
+            "",
+            "IMPORTANT: Do NOT create any additional files. Only edit the file specified above.",
+            "If dependencies are missing, add them directly to the file being edited.",
+            "Do not create separate dependency files or any other auxiliary files."
         ])
         
         return "\n".join(prompt_parts)
@@ -281,11 +291,23 @@ class ClaudeErrorFixer:
     def _run_claude_fix(self, prompt: str, file_path: Path) -> Optional[str]:
         """Run Claude CLI to fix the code."""
         try:
-            # Use the model selected in _generate_fix_prompt (which may have changed based on strategy)
-            cmd = ["claude", "--dangerously-skip-permissions", "--model", self.model]
+            # Get appropriate model based on strategy or use configured model
+            if self.use_model_strategy:
+                # Extract attempt number from prompt (hacky but works)
+                attempt_number = 1
+                if "Attempt 2" in prompt:
+                    attempt_number = 2
+                elif "Attempt 3" in prompt:
+                    attempt_number = 3
+                model = get_model_for_task("fix_render_error", context={"attempt_number": attempt_number})
+            else:
+                model = self.model
+                
+            # Use the model selected
+            cmd = ["claude", "--dangerously-skip-permissions", "--model", model]
             
             if self.verbose:
-                logger.info("Running Claude to fix render errors...")
+                logger.info(f"Running Claude ({model}) to fix render errors...")
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -416,6 +438,38 @@ class ClaudeErrorFixer:
             changes.append("Made subtle modifications")
         
         return changes
+    
+    def get_fix_statistics(self) -> Dict[str, Any]:
+        """Get statistics about fix attempts and success patterns."""
+        stats = {
+            'total_attempts': len(self.fix_history) + sum(len(attempts) for attempts in self.failed_attempts.values()),
+            'successful_fixes': len(self.fix_history),
+            'success_rate': 0,
+            'common_errors': {},
+            'successful_patterns': {}
+        }
+        
+        # Calculate success rate
+        if stats['total_attempts'] > 0:
+            stats['success_rate'] = stats['successful_fixes'] / stats['total_attempts']
+        
+        # Analyze common error patterns
+        error_counts = {}
+        for history in self.fix_history:
+            pattern = history['error_pattern']
+            error_counts[pattern] = error_counts.get(pattern, 0) + 1
+        
+        stats['common_errors'] = dict(sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+        
+        # Analyze successful fix patterns
+        fix_counts = {}
+        for history in self.fix_history:
+            for change in history['fix_summary']:
+                fix_counts[change] = fix_counts.get(change, 0) + 1
+        
+        stats['successful_patterns'] = dict(sorted(fix_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+        
+        return stats
 
 
 # Backward compatibility alias

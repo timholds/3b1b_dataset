@@ -9,9 +9,12 @@ import json
 import time
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import logging
 from datetime import datetime
+
+# Import model strategy
+from model_strategy import get_model_for_task
 
 class CodeCleaner:
     def __init__(self, base_dir: str, verbose: bool = False, timeout_multiplier: float = 1.0, max_retries: int = 3):
@@ -70,6 +73,14 @@ class CodeCleaner:
         """Wrapper that ensures log file is created before logging."""
         self._ensure_log_file()
         return original_method(msg, *args, **kwargs)
+    
+    def _make_progress_bar(self, current: int, total: int, width: int = 30) -> str:
+        """Create a simple ASCII progress bar."""
+        if total == 0:
+            return "[" + " " * width + "]"
+        filled = int(width * current / total)
+        bar = "█" * filled + "░" * (width - filled)
+        return f"[{bar}]"
         
     def load_match_results(self, year: int) -> Dict[str, Dict]:
         """Load all match results for a given year."""
@@ -144,13 +155,25 @@ class CodeCleaner:
             
         return True, "Ready for cleaning"
         
-    def estimate_total_file_size(self, files: List[str], year: int) -> int:
+    def estimate_total_file_size(self, files: List[Union[str, Dict]], year: int) -> int:
         """Estimate total size of files to be processed."""
         total_size = 0
-        videos_dir = self.data_dir / 'videos' / f'_{year}'
         
-        for file_name in files:
-            file_path = videos_dir / file_name
+        for file_info in files:
+            # Handle both string file names and dictionary file info
+            if isinstance(file_info, dict):
+                # This shouldn't happen after normalization, but handle it just in case
+                file_path = self.base_dir / file_info['path']
+            else:
+                # String file names - check if they include a path
+                if '/' in file_info:
+                    # Path already included (e.g., data/videos/_2016/...)
+                    file_path = self.base_dir / file_info
+                else:
+                    # Just a filename (common in 2015 data)
+                    videos_dir = self.data_dir / 'videos' / f'_{year}'
+                    file_path = videos_dir / file_info
+                
             if file_path.exists():
                 total_size += file_path.stat().st_size
             else:
@@ -214,7 +237,7 @@ Include this header:
 ```python
 # Video: [Title if available]
 # YouTube ID: {video_id}
-# Generated from: {', '.join(all_files)}
+# Generated from: {', '.join([f['path'] if isinstance(f, dict) else f for f in all_files])}
 # Cleaned on: {datetime.now().isoformat()}
 # Manim version: ManimGL (original 3b1b version)
 ```
@@ -251,16 +274,19 @@ create a file with comments explaining what went wrong."""
                 else:
                     current_timeout = timeout
                     
+                # Get appropriate model for cleaning task
+                model = get_model_for_task("clean_code", context={"file_size": file_size})
+                
                 # More specific logging - check if this is a scene-specific cleaning
                 scene_name = video_id.split('_', 1)[-1] if '_' in video_id else None
                 if scene_name and scene_name != video_id:
-                    self.logger.info(f"Running Claude cleaning for scene '{scene_name}' in {caption_dir} (attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, {file_size:,} chars)")
+                    self.logger.info(f"Running Claude cleaning for scene '{scene_name}' in {caption_dir} (model: {model}, attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, {file_size:,} chars)")
                 else:
-                    self.logger.info(f"Running Claude cleaning for {caption_dir} (attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, file size: {file_size:,} bytes)")
+                    self.logger.info(f"Running Claude cleaning for {caption_dir} (model: {model}, attempt {attempt + 1}/{max_retries}, timeout: {current_timeout:.0f}s, file size: {file_size:,} bytes)")
                 start_time = time.time()
                 
-                # Run Claude with the cleaning prompt - now using sonnet
-                claude_command =  ["claude", "--dangerously-skip-permissions",  "--model", "sonnet"]
+                # Run Claude with the cleaning prompt - using model from strategy
+                claude_command =  ["claude", "--dangerously-skip-permissions",  "--model", model]
                 
                 try:
                     if self.verbose:
@@ -277,7 +303,9 @@ create a file with comments explaining what went wrong."""
                     
                     if self.verbose and result.stdout:
                         # Print output after completion if verbose
-                        print(f"    Claude response preview: {result.stdout[:200]}...")
+                        # Truncate response preview for readability
+                        preview = result.stdout[:100].replace('\n', ' ').strip()
+                        print(f"    Response: {preview}...")
                         
                 except subprocess.TimeoutExpired as e:
                     # Re-raise with our timeout value
@@ -304,9 +332,9 @@ create a file with comments explaining what went wrong."""
                 # More specific logging - check if this is a scene-specific cleaning
                 scene_name = video_id.split('_', 1)[-1] if '_' in video_id else None
                 if scene_name and scene_name != video_id:
-                    self.logger.info(f"Claude cleaning completed for scene '{scene_name}' in {caption_dir} in {elapsed_time:.1f} seconds")
+                    self.logger.info(f"  Completed in {elapsed_time:.1f}s")
                 else:
-                    self.logger.info(f"Claude cleaning completed for {caption_dir} in {elapsed_time:.1f} seconds")
+                    self.logger.info(f"  Completed in {elapsed_time:.1f}s")
                     
                 return {
                     "status": "completed",
@@ -417,7 +445,9 @@ create a file with comments explaining what went wrong."""
         
         # Fix 5: Fix invalid assignment with quotes
         # Pattern: = " "Something (extra quotes in assignment)
-        assignment_pattern = r'=\s*"\s*"\s*(\w+)'
+        # IMPORTANT: Only match when all components are on the same line
+        # The negative lookahead (?!\s*\n) ensures we don't match across line boundaries
+        assignment_pattern = r'=\s*"\s*"(?!\s*\n)\s*(\w+)'
         code = re.sub(assignment_pattern, r'= \1', code)
         
         # Fix 6: Fix malformed raw strings
@@ -614,8 +644,24 @@ create a file with comments explaining what went wrong."""
         
         self.logger.info(f"Starting cleaning process for {len(match_results)} matched videos")
         
+        # Track progress and timing
+        video_count = 0
+        total_videos = len(match_results)
+        processing_times = []  # Track time per video for estimates
+        stage_start_time = time.time()
+        
         for caption_dir, match_data in match_results.items():
+            video_count += 1
+            video_start_time = time.time()
             video_id = match_data.get('video_id', 'unknown')
+            
+            # Add visual separator for new video with progress
+            if self.verbose:
+                print("\n\n\n" + "="*80)
+                print(f"VIDEO {video_count}/{total_videos}: {caption_dir} (ID: {video_id})")
+                progress_bar = self._make_progress_bar(video_count - 1, total_videos)
+                print(f"Progress: {progress_bar} {video_count-1}/{total_videos} ({((video_count-1)/total_videos*100):.1f}%)")
+                print("="*80)
             
             # Skip if already completed in previous run
             if resume and caption_dir in checkpoint["completed_videos"]:
@@ -811,6 +857,23 @@ create a file with comments explaining what went wrong."""
             with open(log_file, 'w') as f:
                 json.dump(logs, f, indent=2)
                 
+            # Track processing time
+            video_elapsed = time.time() - video_start_time
+            processing_times.append(video_elapsed)
+            
+            # Print running statistics with time estimates
+            if self.verbose:
+                print(f"\n  Running Stats: {stats['cleaned']} cleaned, {stats['skipped']} skipped, {stats['failed']} failed")
+                completion_rate = (stats['cleaned'] / video_count * 100) if video_count > 0 else 0
+                print(f"  Success Rate: {completion_rate:.1f}%")
+                
+                # Estimate remaining time
+                if video_count < total_videos and len(processing_times) > 0:
+                    avg_time = sum(processing_times) / len(processing_times)
+                    remaining_videos = total_videos - video_count
+                    est_remaining = avg_time * remaining_videos
+                    print(f"  Time: {video_elapsed:.1f}s this video, ~{est_remaining/60:.1f}m remaining")
+            
             # Small delay between API calls
             time.sleep(2)
             
@@ -826,8 +889,25 @@ create a file with comments explaining what went wrong."""
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
             
+        # Print final summary
+        if self.verbose:
+            total_elapsed = time.time() - stage_start_time
+            print("\n\n" + "="*80)
+            print("CLEANING STAGE COMPLETE")
+            print("="*80)
+            print(f"Total Videos: {stats['total_matched']}")
+            print(f"  ✓ Cleaned: {stats['cleaned']}")
+            print(f"  ⏩ Skipped: {stats['skipped']} (Low confidence: {stats['low_confidence']}, No files: {stats['no_files']})")
+            print(f"  ✗ Failed: {stats['failed']}")
+            success_rate = (stats['cleaned'] / stats['total_matched'] * 100) if stats['total_matched'] > 0 else 0
+            print(f"\nOverall Success Rate: {success_rate:.1f}%")
+            print(f"Total Time: {total_elapsed/60:.1f} minutes")
+            if len(processing_times) > 0:
+                avg_time = sum(processing_times) / len(processing_times)
+                print(f"Average Time per Video: {avg_time:.1f} seconds")
+            print("="*80)
+        
         self.logger.info(f"Cleaning complete. Summary saved to {summary_file}")
-        self.logger.info(f"Stats: {stats}")
         
         return summary
 

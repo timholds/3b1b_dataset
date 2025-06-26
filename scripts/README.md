@@ -31,9 +31,8 @@ python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --fo
 1. **`claude_match_videos.py`** - AI-powered video-to-code matching
 2. **`clean_matched_code.py`** - Code cleaning and import inlining (monolithic mode)
 3. **`clean_matched_code_scenes.py`** - Scene-aware cleaning with dependency analysis ✨
-4. **`convert_manimgl_to_manimce.py`** - ManimGL to ManimCE converter (monolithic mode)
-5. **`convert_manimgl_to_manimce_scenes.py`** - Scene-level conversion with parallel processing ✨
-6. **`render_videos.py`** - Video rendering from ManimCE code
+4. **`integrated_pipeline_converter.py`** - Integrated ManimCE converter with dependency analysis ✨
+5. **`render_videos.py`** - Video rendering from ManimCE code
 
 ### Supporting Scripts
 - **`manimce_conversion_utils.py`** - Utility functions for code conversion
@@ -42,7 +41,6 @@ python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --fo
 - **`scene_relationship_analyzer.py`** - Analyzes relationships between scenes ✨
 - **`scene_validator.py`** - Validates cleaned scenes before conversion ✨
 - **`manimce_precompile_validator.py`** - Pre-compile validation with auto-fixes
-- **`extract_training_snippets.py`** - Extract self-contained scene snippets
 - **`extract_video_urls.py`** - Extract YouTube metadata from captions
   ```bash
   python extract_video_urls.py --year 2015
@@ -74,8 +72,6 @@ python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --fo
 4. RENDERING: Render videos (optional)
    └─> outputs/{year}/*/rendered_videos/*.mp4
 
-5. SNIPPET EXTRACTION: Extract self-contained training snippets
-   └─> outputs/{year}/*/snippets/*.py
 ```
 
 ## 📋 Common Commands
@@ -167,7 +163,7 @@ python scripts/test_video_rendering.py
     │       │   └── *.py
     │       ├── rendered_videos/          # Rendered videos
     │       │   └── *.mp4
-    │       ├── snippets/                 # Training snippets
+    │       ├── snippets/                 # Self-contained scenes (created during conversion)
     │       │   └── *.py
     │       ├── logs.json                 # Processing logs
     │       └── scene_validation_report.txt # Validation report ✨

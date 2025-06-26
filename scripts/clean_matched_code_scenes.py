@@ -9,7 +9,7 @@ import ast
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import logging
 from datetime import datetime
 
@@ -45,14 +45,37 @@ class SceneAwareCleaner(CodeCleaner):
     def __init__(self, base_dir: str, verbose: bool = False, 
                  timeout_multiplier: float = 1.0, max_retries: int = 3):
         super().__init__(base_dir, verbose, timeout_multiplier, max_retries)
+    
+    def _make_progress_bar(self, current: int, total: int, width: int = 20) -> str:
+        """Create a simple ASCII progress bar."""
+        if total == 0:
+            return "[" + " " * width + "]"
+        filled = int(width * current / total)
+        bar = "█" * filled + "░" * (width - filled)
+        return f"[{bar}]"
         
-    def extract_scenes_from_files(self, files: List[str], year: int) -> List[SceneInfo]:
+    def extract_scenes_from_files(self, files: List[Union[str, Dict]], year: int) -> List[SceneInfo]:
         """Extract all Scene classes from a list of files."""
         scenes = []
-        videos_dir = self.data_dir / 'videos' / f'_{year}'
         
-        for file_name in files:
-            file_path = videos_dir / file_name
+        for file_info in files:
+            # Handle both string file names and dictionary file info
+            if isinstance(file_info, dict):
+                # Path in dict already includes 'data/videos/...' so use base_dir
+                file_path = self.base_dir / file_info['path']
+                file_name = file_info['path']
+            else:
+                # String file names - check if they include a path
+                if '/' in file_info:
+                    # Path already included (e.g., data/videos/_2016/...)
+                    file_path = self.base_dir / file_info
+                    file_name = file_info
+                else:
+                    # Just a filename (common in 2015 data)
+                    videos_dir = self.data_dir / 'videos' / f'_{year}'
+                    file_path = videos_dir / file_info
+                    file_name = file_info
+                
             if not file_path.exists():
                 self.logger.warning(f"File not found: {file_path}")
                 continue
@@ -103,23 +126,28 @@ class SceneAwareCleaner(CodeCleaner):
                     )
                     
                     scenes.append(scene)
-                    self.logger.info(f"Found scene {node.name} in {file_name} "
-                                   f"(L{start_line+1}-{end_line}) "
-                                   f"deps: {len(dependency_info.functions)}f/{len(dependency_info.classes)}c/{len(dependency_info.constants)}const")
+                    # Simplify scene found message
+                    deps_str = f"{len(dependency_info.functions)}f/{len(dependency_info.classes)}c/{len(dependency_info.constants)}const"
+                    self.logger.info(f"  • {node.name} ({end_line - start_line} lines, deps: {deps_str})")
         
         return scenes
     
     def _inherits_from_scene(self, node: ast.ClassDef) -> bool:
         """Check if a class inherits from Scene or its subclasses."""
-        scene_base_classes = {'Scene', 'ThreeDScene', 'SpecialThreeDScene', 
-                             'MovingCameraScene', 'ZoomedScene'}
+        # Known scene base classes that don't end with "Scene"
+        special_scene_classes = {
+            'RearrangeEquation', 'TeacherStudentsScene', 'PiCreatureScene'
+        }
         
         for base in node.bases:
-            if isinstance(base, ast.Name) and base.id in scene_base_classes:
-                return True
-            # Handle attribute access like manimlib.Scene
-            elif isinstance(base, ast.Attribute) and base.attr in scene_base_classes:
-                return True
+            # Check for direct inheritance (e.g., GraphScene, NumberLineScene)
+            if isinstance(base, ast.Name):
+                if base.id.endswith('Scene') or base.id in special_scene_classes:
+                    return True
+            # Handle attribute access (e.g., manimlib.GraphScene)
+            elif isinstance(base, ast.Attribute):
+                if base.attr.endswith('Scene') or base.attr in special_scene_classes:
+                    return True
                 
         return False
     
@@ -188,6 +216,10 @@ CRITICAL INSTRUCTIONS:
 - Ensure the output is syntactically valid Python
 - If you see 'from manimlib import *' or 'from manim_imports_ext import *', keep it exactly as is
 - Place helper functions and constants BEFORE the scene class
+
+IMPORTANT: Do NOT create any additional files. Only save the cleaned scene to the specified path.
+Do not create separate dependency files or any other auxiliary files.
+If dependencies are missing, include them directly in the cleaned scene file.
 
 Save the cleaned scene to: {output_path}
 
@@ -285,7 +317,13 @@ Include this header:
         ordered_scenes = [scene_map[name] for name in scene_order if name in scene_map]
         
         for i, scene in enumerate(ordered_scenes, 1):
-            self.logger.info(f"Processing scene {i}/{len(ordered_scenes)}: '{scene.name}' ({len(scene.code)} chars)")
+            # Add visual separator between scenes with progress
+            if self.verbose:
+                print("\n" + "-"*60)
+                progress_bar = self._make_progress_bar(i - 1, len(ordered_scenes))
+                progress_pct = ((i-1) / len(ordered_scenes) * 100) if len(ordered_scenes) > 0 else 0
+                print(f"Scene {i}/{len(ordered_scenes)} {progress_bar} ({progress_pct:.0f}%)")
+            self.logger.info(f"Processing '{scene.name}' ({len(scene.code)} chars)")
             
             # Get context for this scene
             scene_context = relationship_analysis['contexts'].get(scene.name, {})
@@ -298,9 +336,10 @@ Include this header:
                 scene_context, scene_dependencies, relationship_analysis
             )
             
-            # Scene context info - show relationship count
+            # Scene context info - more concise
             relation_count = len(scene_dependencies)
-            self.logger.info(f"Claude cleaning: '{scene.name}' with {relation_count} relationships to other scenes")
+            rel_str = f" ({relation_count} rel)" if relation_count > 0 else ""
+            self.logger.info(f"  Claude API: '{scene.name}'{rel_str}")
             result = self.run_claude_cleaning(
                 prompt, f"{video_id}_{scene.name}", caption_dir, year,
                 file_size=len(scene.code), max_retries=self.max_retries
@@ -312,16 +351,16 @@ Include this header:
                 if cleaned_file.exists():
                     is_valid, error = self.validate_cleaned_code(cleaned_file)
                     if is_valid:
-                        self.logger.info(f"✓ Scene '{scene.name}' with context cleaned successfully")
+                        self.logger.info(f"  ✓ {scene.name} cleaned")
                         cleaning_results['cleaned_scenes'] += 1
                         result['validation'] = 'passed'
                     else:
-                        self.logger.warning(f"✗ Scene '{scene.name}' context validation failed: {error[:100]}...")
+                        self.logger.warning(f"  ✗ {scene.name} validation failed: {error[:50]}...")
                         result['validation'] = 'failed'
                         result['validation_error'] = error
                         cleaning_results['failed_scenes'] += 1
                 else:
-                    self.logger.error(f"✗ Scene '{scene.name}' context - output file not created")
+                    self.logger.error(f"  ✗ {scene.name} - file not created")
                     result['validation'] = 'file_not_created'
                     
                     # Try progressive recovery
@@ -441,6 +480,10 @@ CRITICAL INSTRUCTIONS:
 - Ensure the scene can work independently while maintaining its context
 - Place helper functions and constants BEFORE the scene class
 - Add comments explaining the scene's purpose if not already present
+
+IMPORTANT: Do NOT create any additional files. Only save the cleaned scene to the specified path.
+Do not create separate dependency files or any other auxiliary files.
+If dependencies are missing, include them directly in the cleaned scene file.
 
 Save the cleaned scene to: {output_path}
 
@@ -768,6 +811,10 @@ Common issues to check:
 - Missing CONFIG dictionary
 - Unresolved color constants (BLUE_A, RED_B, etc.)
 
+IMPORTANT: Do NOT create any additional files. Only save the cleaned scene to the specified path.
+Do not create separate dependency files or any other auxiliary files.
+If dependencies are missing, include them directly in the cleaned scene file.
+
 Save the recovered scene to: {output_path}"""
     
     def combine_cleaned_scenes(self, scenes_dir: Path, output_file: Path) -> bool:
@@ -858,16 +905,21 @@ Save the recovered scene to: {output_path}"""
                 'error': 'No Scene classes found in files'
             }
         
-        self.logger.info(f"Extracted {len(scenes)} scenes from {len(all_files)} files")
+        # Scene extraction summary
+        if self.verbose:
+            print(f"\nExtracted {len(scenes)} scenes from {len(all_files)} files:")
         
         # Analyze scene relationships before cleaning
-        self.logger.info(f"Analyzing relationships between {len(scenes)} scenes...")
+        self.logger.info(f"Analyzing scene relationships...")
         relationship_analyzer = SceneRelationshipAnalyzer(scenes)
         relationship_analysis = relationship_analyzer.analyze_all_relationships()
         
-        self.logger.info(f"Found {len(relationship_analysis['relationships'])} scene relationships, {len(relationship_analysis['shared_objects'])} shared objects")
+        # Summary of relationships
+        n_rels = len(relationship_analysis['relationships'])
+        n_shared = len(relationship_analysis['shared_objects'])
         flow = relationship_analysis['flow_analysis']
-        self.logger.info(f"Scene order: {len(flow['introduction_scenes'])}intro + {len(flow['development_scenes'])}dev + {len(flow['conclusion_scenes'])}conclusion + {len(flow['independent_scenes'])}indep")
+        flow_str = f"{len(flow['introduction_scenes'])}i/{len(flow['development_scenes'])}d/{len(flow['conclusion_scenes'])}c/{len(flow['independent_scenes'])}x"
+        self.logger.info(f"  Relationships: {n_rels}, Shared objects: {n_shared}, Flow: {flow_str}")
         
         # Store relationship analysis for use during cleaning
         self.current_relationship_analysis = relationship_analysis
@@ -892,6 +944,17 @@ Save the recovered scene to: {output_path}"""
             'shared_objects': len(relationship_analysis['shared_objects']),
             'flow_analysis': relationship_analysis['flow_analysis']
         }
+        
+        # Print completion summary for this video
+        if self.verbose:
+            success_bar = self._make_progress_bar(cleaning_results['cleaned_scenes'], cleaning_results['total_scenes'], width=15)
+            print(f"\n  Summary: {success_bar} {cleaning_results['cleaned_scenes']}/{cleaning_results['total_scenes']} scenes cleaned")
+            if cleaning_results['failed_scenes'] > 0:
+                print(f"  ⚠️  {cleaning_results['failed_scenes']} scenes failed")
+            if combine_success:
+                print(f"  ✅ Combined into cleaned_code.py")
+            else:
+                print(f"  ❌ Combination failed")
         
         return cleaning_results
 

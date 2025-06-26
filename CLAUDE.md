@@ -28,6 +28,8 @@ For the definitive source of truth on the system architecture, see **[docs/CURRE
 - ✅ **Inter-stage Validation**: Validates cleaned scenes before conversion (Dec 2024)
 - ✅ **Progressive Error Recovery**: Multiple strategies to recover failed scenes (Dec 2024)
 - ✅ **Integrated Scene Validation**: Real-time dependency analysis and scene-level render validation during conversion (Jun 2025)
+- ✅ **Smart Model Selection**: Cost-optimized model selection - Opus for complex tasks (matching), Sonnet for mechanical tasks (cleaning, retry fixes)
+- ✅ **Enhanced Error Context**: Rich context passing between stages for better error recovery
 
 ### Known Issues (Fixed)
 - ✅ **String Continuations**: Now handles backslash continuations in strings properly
@@ -45,6 +47,7 @@ For the definitive source of truth on the system architecture, see **[docs/CURRE
 - ✅ **Tex List Arguments**: Added pattern to convert `Tex(SOME_LIST, size=...)` to `MathTex(*SOME_LIST)` (Dec 2024)
 - ✅ **Tex vs MathTex Detection**: Both AST and regex converters now detect math patterns in Tex/OldTex content and intelligently choose between Tex and MathTex (Dec 2024)
 - ✅ **Parameterized Scenes**: Automatically converts `construct(self, arg1, arg2)` to use `__init__` and instance attributes (Dec 2024)
+- ✅ **Claude API Mismatch**: Fixed integrated_pipeline_converter expecting tuple from fix_render_error (Jun 2025)
 
 ### Remaining Issues
 - ⚠️ **ContinualAnimation**: Automatic updater conversion may need manual tweaking for complex cases
@@ -54,24 +57,14 @@ For the definitive source of truth on the system architecture, see **[docs/CURRE
 - ⚠️ **ThoughtBubble References**: Not included in Pi Creature removal patterns - see issue #5 in `docs/manimgl_to_manimce_conversion.md`
 - ⚠️ **LaTeX Environment Detection**: Some edge cases like `\begin{flushleft}` may not be detected for Tex conversion
 
-### Training Snippet Extraction ✅ COMPLETED (Dec 2024)
-- 🎯 **Scene Dependencies**: Successfully extracting self-contained scenes with dependencies
-- 📋 **Documentation**: See `docs/TRAINING_SNIPPETS_PLAN.md` and `docs/SNIPPET_EXTRACTION_PROGRESS.md`
-- ✅ **Implementation Complete**: 
-  - ✅ Created `extract_training_snippets.py` with AST-based dependency analysis
-  - ✅ Smart dependency tracking (recursive functions, class dependencies, constants)
-  - ✅ ManimGL compatibility functions added automatically
-  - ✅ Integrated with pipeline via `--extract-snippets` flag
-  - ✅ Tested on music-and-measure-theory: 42/42 scenes extracted successfully
-  - 📊 **Success Rate**: 100% extraction, 100% syntax validation
 
 ### 🚀 NEW: Scene-by-Scene Conversion Mode (Dec 2024)
 - ✅ **Implemented**: Alternative to monolithic file conversion for better Claude context management
 - ✅ **Scene-Aware Cleaning**: `clean_matched_code_scenes.py` extracts and cleans individual scenes
-- ✅ **Scene-Level Conversion**: `convert_manimgl_to_manimce_scenes.py` converts scenes in parallel
+- ✅ **Scene-Level Conversion**: `integrated_pipeline_converter.py` converts scenes with dependency analysis
 - ✅ **Better Error Isolation**: Each scene processed independently with focused Claude calls
 - ✅ **Automatic Fallback**: Falls back to monolithic mode if scene mode fails
-- ✅ **Mode Comparison Tool**: `compare_conversion_modes.py` to evaluate which approach works best
+- ✅ **Integrated Converter**: Scene-by-scene conversion with real-time dependency analysis
 - 🔧 **Default Mode**: Scene-by-scene is now the default for both cleaning and conversion
 - ✅ **SOLVED**: Dependency analysis and scene-level render validation now integrated via enhanced converter
 
@@ -80,23 +73,17 @@ For the definitive source of truth on the system architecture, see **[docs/CURRE
 ### Problem Identified
 The current pipeline has a critical gap where scene-level validation and dependency analysis are disconnected:
 - **Scene-by-scene conversion** works but shows "0 functions and 0 class dependencies"  
-- **Dependency analysis** only happens in separate snippet extraction stage (`--extract-snippets`)
 - **Render validation** tests combined files instead of individual scenes
 - **No scene-level error isolation** for render failures
 
-### Current Architecture (Problematic)
-```
-Clean → Convert Scenes → Combine → Render Validate (monolithic) → [Separate] Extract Snippets + Dependencies
-```
-
-### Target Architecture (Improved)
+### Current Architecture (Integrated)
 ```  
 Clean → Convert Scene → Extract Dependencies → Create Self-Contained Snippet → Validate by Rendering → Combine
 ```
 
 ### Implementation Plan
 1. **Integrate Dependency Analysis into Conversion**
-   - Modify `convert_manimgl_to_manimce_scenes.py` to use `DependencyAnalyzer` from `extract_training_snippets.py`
+   - ✅ DONE: Integrated converter uses `DependencyAnalyzer` during conversion
    - Add dependency tracking to conversion reports (functions, classes, constants counts)
    - Generate self-contained snippets during conversion, not as separate stage
 
@@ -166,7 +153,7 @@ We've successfully added intelligent error recovery using Claude CLI (subprocess
 - **Learning System**: Tracks successful fixes to improve future attempts
 
 ### Components Added
-- `claude_api_helper.py`: ClaudeErrorFixer class using subprocess (like convert_manimgl_to_manimce.py)
+- `claude_api_helper.py`: ClaudeErrorFixer class using subprocess for error recovery
 - Enhanced `enhanced_scene_converter.py` with `_validate_render` retry loop
 - Integration in `enhanced_scene_converter_pipeline.py` with flags
 
