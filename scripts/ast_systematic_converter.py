@@ -1073,8 +1073,8 @@ class ASTSystematicConverter:
                 if isinstance(node.func, ast.Name):
                     class_name = node.func.id
                     
-                    # 1. Smart OldTex/SimpleTex conversion - decide between Tex and MathTex based on content
-                    if class_name in ['OldTex', 'SimpleTex']:
+                    # 1. Smart Tex conversion - decide between Tex and MathTex based on content
+                    if class_name in ['OldTex', 'SimpleTex', 'Tex']:
                         # Check if we can determine content to decide Tex vs MathTex
                         target_class = 'Tex'  # Default
                         
@@ -1095,11 +1095,27 @@ class ASTSystematicConverter:
                             content = node.args[0].value
                             if '\\frac{%' in content or any(f'\\{cmd}{{%' in content for cmd in ['sum', 'int', 'sqrt']):
                                 target_class = 'MathTex'
+                        # Check for BinOp (%) with string that contains math patterns
+                        elif (node.args and isinstance(node.args[0], ast.BinOp) and 
+                              isinstance(node.args[0].op, ast.Mod) and
+                              isinstance(node.args[0].left, ast.Constant) and 
+                              isinstance(node.args[0].left.value, str)):
+                            content = node.args[0].left.value
+                            math_patterns = ['\\frac', '\\sum', '\\int', '\\prod', '\\lim', '\\alpha', '\\beta', 
+                                           '\\gamma', '\\delta', '\\epsilon', '\\theta', '\\lambda', '\\mu', 
+                                           '\\pi', '\\sigma', '\\infty', '\\partial', '\\nabla', '\\cdot', 
+                                           '\\times', '\\leq', '\\geq', '\\neq', '\\approx', '\\pm', 
+                                           '\\sqrt', '\\log', '\\ln', '\\sin', '\\cos', '\\tan', '^', '_',
+                                           '\\left', '\\right', '\\over']
+                            if any(pattern in content for pattern in math_patterns):
+                                target_class = 'MathTex'
                         
-                        node.func.id = target_class
-                        self.converter.stats.transformations_applied += 1
-                        self.converter.stats.patterns_matched[f'smart_{class_name}_to_{target_class}'] = \
-                            self.converter.stats.patterns_matched.get(f'smart_{class_name}_to_{target_class}', 0) + 1
+                        # Apply transformation if target is different from current
+                        if target_class != class_name:
+                            node.func.id = target_class
+                            self.converter.stats.transformations_applied += 1
+                            self.converter.stats.patterns_matched[f'smart_{class_name}_to_{target_class}'] = \
+                                self.converter.stats.patterns_matched.get(f'smart_{class_name}_to_{target_class}', 0) + 1
                     
                     # 2. Other direct class name mappings
                     elif class_name in self.converter.class_mappings:

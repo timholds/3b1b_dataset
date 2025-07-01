@@ -78,6 +78,25 @@ class RuntimeConversionFixer:
                 'Fix corrupted MathMathTex to MathTex'
             ),
             
+            # Fix malformed raw string literals from AST conversion
+            (
+                r"MathTex\s*\(\s*['\"]r\"\\\\([^'\"]*)\"\s*%",
+                r'MathTex(r"\\\\frac{%d}{%d}" %',
+                'Fix malformed raw string in MathTex with formatting'
+            ),
+            (
+                r"MathTex\s*\(\s*['\"]r\"\\\\frac\{[^}]*\}\{[^}]*\}\"['\"]",
+                r'MathTex(r"\\\\frac{%d}{%d}"',
+                'Fix malformed raw string literal in MathTex'
+            ),
+            
+            # Fix remaining Tex with variables that contain fractions (from list comprehensions)
+            (
+                r"Tex\s*\(\s*s\s*\)",
+                r'MathTex(s)',
+                'Fix Tex(s) to MathTex(s) in list comprehensions'
+            ),
+            
             # Fix Tex with any mathematical fraction (including variables)
             (
                 r"Tex\s*\(\s*['\"]([^'\"]*\\\\frac\{[^}]+\}\{[^}]+\}[^'\"]*)['\"]",
