@@ -35,3 +35,10 @@ python scripts/build_dataset_pipeline.py --year 2016 --force-clean --force-conve
 
 ----
 we have a single goal this session: fix the main bug that is currently preventing any given video from being cleaned, converted, and rendered correctly. check out my latest run of @scripts/build_dataset_pipeline.py `python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --force-clean --force-convert --force-render --render --parallel-render 4 --timeout-multiplier 5.0 --verbose`
+
+
+---
+okay check out the 6 videos that we just rendered to /Users/timholdsworth/code/3b1b_dataset/outputs/2015/inventing-math/videos. EVERY single one has serious formatting issues that make it look WAY different than the original scene. See if you can identify the top 3-5 issues with specific examples in either the cleaning or conversion stage so that we can go back and fix them in the    pipeline. I ran with the command `python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --force-convert --force-render --render --parallel-render 4 --timeout-multiplier 5.0 --min-conversion-confidence .8 --verbose`. Feel free to use Gemini to analyze the logs in the background   it speeds up your process. Take your time and think deeply, since this is now the limiting factor in our   project       
+
+----
+you can use my most recent run of @scripts/build_dataset_pipeline.py that i ran with `python scripts/build_dataset_pipeline.py --year 2015 --video inventing-math --force-convert --force-render --render --parallel-render 4 --timeout-multiplier 5.0 --min-conversion-confidence .8 --verbose` Take your time and think about the exact fix needed and justify your answer with evidence. Critical thinking and     attention to detail are important here, since this is the current bottleneck in our project. 

@@ -310,6 +310,28 @@ class ASTSystematicConverter:
             'success_rate': self.ast_parse_successes / max(1, self.ast_parse_successes + self.ast_parse_failures)
         }
 
+    def _intelligent_math_join(self, elements: List[str]) -> str:
+        """
+        Intelligently join mathematical text elements with proper spacing.
+        
+        This fixes the text spacing issue where mathematical expressions like
+        ['1', '+2', '+4', '+8', '+\\cdots', '+2^n', '+\\cdots', '= -1']
+        were being joined without spaces, resulting in '1+2+4+8+\\cdots+2^n+\\cdots= -1'
+        instead of the correct '1 + 2 + 4 + 8 + \\cdots + 2^n + \\cdots = -1'.
+        
+        Args:
+            elements: List of string elements to join
+            
+        Returns:
+            Properly spaced mathematical expression string
+        """
+        if not elements:
+            return ''
+        
+        # For mathematical expressions, use space joining by default
+        # This ensures proper spacing around operators and equals signs
+        return ' '.join(elements)
+
     def _apply_all_transformations(self, tree: ast.AST) -> ast.AST:
         """Apply all AST transformations in the correct order."""
         transformations = [
@@ -1050,14 +1072,42 @@ class ASTSystematicConverter:
                 if isinstance(node.func, ast.Name):
                     class_name = node.func.id
                     
-                    # 1. Direct class name mappings
-                    if class_name in self.converter.class_mappings:
+                    # 1. Smart OldTex/SimpleTex conversion - decide between Tex and MathTex based on content
+                    if class_name in ['OldTex', 'SimpleTex']:
+                        # Check if we can determine content to decide Tex vs MathTex
+                        target_class = 'Tex'  # Default
+                        
+                        # Check first argument for math content
+                        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                            content = node.args[0].value
+                            # Math indicators that suggest MathTex
+                            math_patterns = ['\\frac', '\\sum', '\\int', '\\prod', '\\lim', '\\alpha', '\\beta', 
+                                           '\\gamma', '\\delta', '\\epsilon', '\\theta', '\\lambda', '\\mu', 
+                                           '\\pi', '\\sigma', '\\infty', '\\partial', '\\nabla', '\\cdot', 
+                                           '\\times', '\\leq', '\\geq', '\\neq', '\\approx', '\\pm', 
+                                           '\\sqrt', '\\log', '\\ln', '\\sin', '\\cos', '\\tan', '^', '_',
+                                           '\\left', '\\right', '\\over']
+                            if any(pattern in content for pattern in math_patterns):
+                                target_class = 'MathTex'
+                        # Check string formatting that might contain math (e.g., "\\frac{%d}{%d}")
+                        elif node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                            content = node.args[0].value
+                            if '\\frac{%' in content or any(f'\\{cmd}{{%' in content for cmd in ['sum', 'int', 'sqrt']):
+                                target_class = 'MathTex'
+                        
+                        node.func.id = target_class
+                        self.converter.stats.transformations_applied += 1
+                        self.converter.stats.patterns_matched[f'smart_{class_name}_to_{target_class}'] = \
+                            self.converter.stats.patterns_matched.get(f'smart_{class_name}_to_{target_class}', 0) + 1
+                    
+                    # 2. Other direct class name mappings
+                    elif class_name in self.converter.class_mappings:
                         node.func.id = self.converter.class_mappings[class_name]
                         self.converter.stats.transformations_applied += 1
                         self.converter.stats.patterns_matched[f'class_{class_name}'] = \
                             self.converter.stats.patterns_matched.get(f'class_{class_name}', 0) + 1
                     
-                    # 2. Rename parameters FIRST (before removal)
+                    # 3. Rename parameters FIRST (before removal)
                     if class_name in self.converter.parameter_renames:
                         renames = self.converter.parameter_renames[class_name]
                         for kw in node.keywords:
@@ -1065,7 +1115,7 @@ class ASTSystematicConverter:
                                 kw.arg = renames[kw.arg]
                                 self.converter.stats.transformations_applied += 1
                     
-                    # 3. Remove problematic parameters (after renaming)
+                    # 4. Remove problematic parameters (after renaming)
                     if class_name in self.converter.removed_parameters:
                         removed_params = self.converter.removed_parameters[class_name]
                         node.keywords = [
@@ -1174,8 +1224,8 @@ class ASTSystematicConverter:
                                     # For Text, join with spaces (regular text)
                                     joined_text = ' '.join(elt.value for elt in first_arg.elts)
                                 else:
-                                    # For Tex/MathTex, join without spaces (LaTeX code)
-                                    joined_text = ''.join(elt.value for elt in first_arg.elts)
+                                    # For Tex/MathTex, use intelligent spacing for mathematical expressions
+                                    joined_text = self._intelligent_math_join([elt.value for elt in first_arg.elts])
                                 node.args[0] = ast.Constant(value=joined_text)
                                 self.converter.stats.transformations_applied += 1
                                 self.converter.stats.patterns_matched[f'{current_class.lower()}_list_join'] = \
@@ -1187,10 +1237,10 @@ class ASTSystematicConverter:
                               isinstance(first_arg, ast.Name) and 
                               first_arg.id in ['DIVERGENT_SUM_TEXT', 'CONVERGENT_SUM_TEXT', 'PARTIAL_CONVERGENT_SUMS_TEXT', 
                                               'CONVERGENT_SUM_TERMS', 'ALT_PARTIAL_SUM_TEXT']):
-                            # Wrap with ''.join() call
+                            # Wrap with ' '.join() call for proper spacing
                             join_call = ast.Call(
                                 func=ast.Attribute(
-                                    value=ast.Constant(value=''),
+                                    value=ast.Constant(value=' '),
                                     attr='join',
                                     ctx=ast.Load()
                                 ),
@@ -1212,6 +1262,20 @@ class ASTSystematicConverter:
                     # 8.1. Fix malformed Text constructor with list that gets unpacked incorrectly
                     # Pattern: dist, r_paren, ... = [Text([dist_text, '(', '000', ...])]
                     # This should be handled at the assignment level (visit_Assign)
+                    
+                    # 8.2. Fix LaTeX line breaks in Text/MathTex strings
+                    # Pattern: Text('You just invented\\\\ some math') → Text('You just invented\n some math')
+                    if current_class in ['Text', 'MathTex'] and node.args:
+                        first_arg = node.args[0]
+                        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                            original_text = first_arg.value
+                            if '\\\\' in original_text:
+                                # Convert LaTeX line breaks to actual line breaks
+                                fixed_text = original_text.replace('\\\\', '\n')
+                                node.args[0] = ast.Constant(value=fixed_text)
+                                self.converter.stats.transformations_applied += 1
+                                self.converter.stats.patterns_matched['fixed_line_breaks'] = \
+                                    self.converter.stats.patterns_matched.get('fixed_line_breaks', 0) + 1
                     
                     # 9. Vector conversion: Vector(start, direction) → Arrow(start=start, end=start+direction)
                     if class_name == 'Vector' and len(node.args) == 2:
@@ -1300,6 +1364,30 @@ class ASTSystematicConverter:
             
             def _has_math_patterns(self, text):
                 """Check if text contains mathematical LaTeX patterns."""
+                # First check if this is just plain text with line breaks
+                # If the only "math" pattern is \\\\, and the text doesn't have other math indicators,
+                # treat it as plain text with line breaks, not mathematical content
+                if '\\\\' in text:
+                    # Remove the \\\\ and check if remaining text has math patterns
+                    text_without_linebreaks = text.replace('\\\\', ' ')
+                    # If after removing \\\\, there are no math patterns, it's just plain text
+                    other_math_patterns = [
+                        r'\frac', r'\sum', r'\int', r'\sqrt', r'\alpha', r'\beta',
+                        r'\gamma', r'\theta', r'\pi', r'\sigma', r'\omega',
+                        r'\cdot', r'\times', r'\div', r'\leq', r'\geq', r'\neq',
+                        r'^', r'_', r'\left', r'\right',
+                        r'\vec', r'\hat', r'\bar', r'\dot', r'\ddot', r'\tilde',
+                        r'\mathbf', r'\mathbb', r'\mathcal', r'\mathfrak',
+                        r'\partial', r'\nabla', r'\Delta', r'\infty',
+                        r'\lim', r'\sin', r'\cos', r'\tan', r'\log', r'\ln', r'\exp',
+                        r'\binom', r'\choose', r'\pmatrix', r'\matrix',
+                        r'\begin{', r'\end{', r'\text{', r'\mathrm{',
+                        '=', '$'  # Simple math indicators
+                    ]
+                    if not any(pattern in text_without_linebreaks for pattern in other_math_patterns):
+                        return False  # Just plain text with line breaks
+                
+                # Full math patterns including \\\\
                 math_patterns = [
                     r'\frac', r'\sum', r'\int', r'\sqrt', r'\alpha', r'\beta',
                     r'\gamma', r'\theta', r'\pi', r'\sigma', r'\omega',
@@ -2622,10 +2710,10 @@ class ASTSystematicConverter:
                                 'CONVERGENT_SUM_TERMS', 'ALT_PARTIAL_SUM_TEXT'
                             ]
                             if first_arg.id in list_constants:
-                                # Wrap with ''.join() call
+                                # Wrap with ' '.join() call for proper spacing
                                 join_call = ast.Call(
                                     func=ast.Attribute(
-                                        value=ast.Constant(value=''),
+                                        value=ast.Constant(value=' '),
                                         attr='join',
                                         ctx=ast.Load()
                                     ),

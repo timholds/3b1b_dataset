@@ -23,11 +23,11 @@ class RuntimeConversionFixer:
         
         # Pattern fixes to apply
         self.pattern_fixes = [
-            # Fix .center property to .get_center() method
+            # Fix .get_center() method to .center property
             (
-                r'(\w+)\.center(\s*[+\-*/])',
-                r'\1.get_center()\2',
-                'Fix .center property to .get_center() method'
+                r'(\w+)\.get_center\(\)(\s*[+\-*/])',
+                r'\1.center\2',
+                'Fix .get_center() method to .center property'
             ),
             
             # Fix runtime Tex with math content that should be MathTex
@@ -64,6 +64,28 @@ class RuntimeConversionFixer:
                 'Fix string formatted fractions to MathTex'
             ),
             
+            # Fix runtime-generated mathematical fractions (actual numeric values)
+            (
+                r"Tex\s*\(\s*['\"]([^'\"]*\\\\frac\{[0-9]+\}\{[0-9]+\}[^'\"]*)['\"]",
+                r'MathTex(r"\1"',
+                'Fix runtime-generated fractions to MathTex'
+            ),
+            
+            # Fix corrupted MathMathTex instances
+            (
+                r"MathMathTex\s*\(",
+                r'MathTex(',
+                'Fix corrupted MathMathTex to MathTex'
+            ),
+            
+            # Fix Tex with any mathematical fraction (including variables)
+            (
+                r"Tex\s*\(\s*['\"]([^'\"]*\\\\frac\{[^}]+\}\{[^}]+\}[^'\"]*)['\"]",
+                r'MathTex(r"\1"',
+                'Fix any fraction in Tex to MathTex'
+            ),
+            
+            
             # Fix common ManimGL to ManimCE property changes
             (
                 r'(\w+)\.points\[0\]',
@@ -85,14 +107,14 @@ class RuntimeConversionFixer:
             
             # Fix common method vs property issues
             (
-                r'(\w+)\.width(\s*[+\-*/])',
-                r'\1.get_width()\2',
-                'Fix .width property to .get_width() method'
+                r'(\w+)\.get_width\(\)(\s*[+\-*/])',
+                r'\1.width\2',
+                'Fix .get_width() method to .width property'
             ),
             (
-                r'(\w+)\.height(\s*[+\-*/])',
-                r'\1.get_height()\2',
-                'Fix .height property to .get_height() method'
+                r'(\w+)\.get_height\(\)(\s*[+\-*/])',
+                r'\1.height\2',
+                'Fix .get_height() method to .height property'
             ),
         ]
         
@@ -102,7 +124,10 @@ class RuntimeConversionFixer:
             r'\\alpha', r'\\beta', r'\\gamma', r'\\delta', r'\\epsilon',
             r'\\theta', r'\\lambda', r'\\mu', r'\\pi', r'\\sigma',
             r'\\infty', r'\\partial', r'\\nabla', r'\\cdot', r'\\times',
-            r'\\leq', r'\\geq', r'\\neq', r'\\approx', r'\\pm'
+            r'\\leq', r'\\geq', r'\\neq', r'\\approx', r'\\pm',
+            r'\\sqrt', r'\\log', r'\\ln', r'\\sin', r'\\cos', r'\\tan',
+            r'\\over', r'\\left', r'\\right', r'\^', r'\_', r'\$',
+            r'\\Underbrace', r'\\underbrace', r'\\overbrace'
         ]
         
     def fix_file(self, file_path: Path) -> Dict:
@@ -143,6 +168,21 @@ class RuntimeConversionFixer:
                         'suggestion': 'Consider changing to MathTex'
                     })
             
+            # Check for Tex calls with variables in list comprehensions (common pattern for runtime math)
+            tex_var_calls = re.finditer(r'Tex\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)', fixed_content)
+            for match in tex_var_calls:
+                line_num = self._get_line_number(fixed_content, match.start())
+                line_content = self._get_line_content(fixed_content, match.start())
+                
+                # Check if this is in a context that suggests math content
+                if any(indicator in line_content for indicator in ['frac', 'zip', 'for', 'in']):
+                    fixes_applied.append({
+                        'description': 'Tex call with variable in math context',
+                        'line': line_num,
+                        'content': line_content.strip(),
+                        'suggestion': 'Variable may contain math content - consider MathTex'
+                    })
+            
             # Write back if changes were made
             if fixed_content != original_content:
                 # Create backup
@@ -174,6 +214,14 @@ class RuntimeConversionFixer:
     def _get_line_number(self, content: str, position: int) -> int:
         """Get line number for a character position in the content."""
         return content[:position].count('\n') + 1
+        
+    def _get_line_content(self, content: str, position: int) -> str:
+        """Get the content of the line containing the given position."""
+        lines = content.split('\n')
+        line_num = self._get_line_number(content, position) - 1  # Convert to 0-based
+        if 0 <= line_num < len(lines):
+            return lines[line_num]
+        return ""
         
     def fix_directory(self, directory: Path, file_pattern: str = "*.py") -> Dict:
         """Fix all Python files in a directory."""
