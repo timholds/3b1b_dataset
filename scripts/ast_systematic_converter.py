@@ -358,6 +358,7 @@ class ASTSystematicConverter:
             self._fix_undefined_variables,  # NEW: Fix undefined variables like 'you'
             self._fix_additional_api_incompatibilities,  # CRITICAL: Fix other API incompatibilities
             self._fix_critical_runtime_errors,  # CRITICAL: Fix runtime errors that prevent rendering
+            self._fix_scene_timing,  # NEW: Fix scene timing issues for proper video duration
         ]
         
         for transform in transformations:
@@ -2945,6 +2946,123 @@ def initials(word_list):
                 self.stats.patterns_matched.get('added_initials_function_module', 0) + 1
         
         return tree
+
+    def _fix_scene_timing(self, tree: ast.AST) -> ast.AST:
+        """Fix scene timing issues to ensure proper video duration."""
+        class SceneTimingFixer(ast.NodeTransformer):
+            def __init__(self, converter):
+                self.converter = converter
+                self.in_construct = False
+                self.has_animations = False
+                self.last_statement_index = -1
+                self.construct_node = None
+                
+            def visit_FunctionDef(self, node):
+                if node.name == 'construct':
+                    self.in_construct = True
+                    self.construct_node = node
+                    self.has_animations = False
+                    self.last_statement_index = -1
+                    
+                    # Visit all statements to check for animations
+                    for i, stmt in enumerate(node.body):
+                        # Check if this is an animation (self.play(...))
+                        if (isinstance(stmt, ast.Expr) and 
+                            isinstance(stmt.value, ast.Call) and
+                            isinstance(stmt.value.func, ast.Attribute) and
+                            isinstance(stmt.value.func.value, ast.Name) and
+                            stmt.value.func.value.id == 'self' and
+                            stmt.value.func.attr == 'play'):
+                            self.has_animations = True
+                            self.last_statement_index = i
+                        # Check for self.add() calls
+                        elif (isinstance(stmt, ast.Expr) and 
+                              isinstance(stmt.value, ast.Call) and
+                              isinstance(stmt.value.func, ast.Attribute) and
+                              isinstance(stmt.value.func.value, ast.Name) and
+                              stmt.value.func.value.id == 'self' and
+                              stmt.value.func.attr == 'add'):
+                            self.last_statement_index = i
+                    
+                    # Apply timing fixes
+                    new_body = []
+                    for i, stmt in enumerate(node.body):
+                        new_body.append(stmt)
+                        
+                        # After self.add() calls, check if there's a wait
+                        if (isinstance(stmt, ast.Expr) and 
+                            isinstance(stmt.value, ast.Call) and
+                            isinstance(stmt.value.func, ast.Attribute) and
+                            isinstance(stmt.value.func.value, ast.Name) and
+                            stmt.value.func.value.id == 'self' and
+                            stmt.value.func.attr == 'add'):
+                            
+                            # Check if next statement is a wait
+                            has_wait_after = False
+                            if i + 1 < len(node.body):
+                                next_stmt = node.body[i + 1]
+                                if (isinstance(next_stmt, ast.Expr) and 
+                                    isinstance(next_stmt.value, ast.Call) and
+                                    isinstance(next_stmt.value.func, ast.Attribute) and
+                                    next_stmt.value.func.attr == 'wait'):
+                                    has_wait_after = True
+                            
+                            # If no wait after add, and it's not the last statement, add a short wait
+                            if not has_wait_after and i < len(node.body) - 1:
+                                # Add self.wait(0.5) for visibility
+                                wait_call = ast.Expr(
+                                    value=ast.Call(
+                                        func=ast.Attribute(
+                                            value=ast.Name(id='self', ctx=ast.Load()),
+                                            attr='wait',
+                                            ctx=ast.Load()
+                                        ),
+                                        args=[ast.Constant(value=0.5)],
+                                        keywords=[]
+                                    )
+                                )
+                                new_body.append(wait_call)
+                                self.converter.stats.transformations_applied += 1
+                                self.converter.stats.patterns_matched['added_wait_after_add'] = \
+                                    self.converter.stats.patterns_matched.get('added_wait_after_add', 0) + 1
+                    
+                    # Ensure minimum scene duration
+                    if self.last_statement_index >= 0:
+                        # Check if the last statement is already a wait
+                        last_is_wait = False
+                        if new_body:
+                            last_stmt = new_body[-1]
+                            if (isinstance(last_stmt, ast.Expr) and 
+                                isinstance(last_stmt.value, ast.Call) and
+                                isinstance(last_stmt.value.func, ast.Attribute) and
+                                last_stmt.value.func.attr == 'wait'):
+                                last_is_wait = True
+                        
+                        # Add final wait if needed
+                        if not last_is_wait:
+                            # Add self.wait(1) at the end for proper video duration
+                            final_wait = ast.Expr(
+                                value=ast.Call(
+                                    func=ast.Attribute(
+                                        value=ast.Name(id='self', ctx=ast.Load()),
+                                        attr='wait',
+                                        ctx=ast.Load()
+                                    ),
+                                    args=[ast.Constant(value=1)],
+                                    keywords=[]
+                                )
+                            )
+                            new_body.append(final_wait)
+                            self.converter.stats.transformations_applied += 1
+                            self.converter.stats.patterns_matched['added_final_wait'] = \
+                                self.converter.stats.patterns_matched.get('added_final_wait', 0) + 1
+                    
+                    node.body = new_body
+                    self.in_construct = False
+                
+                return self.generic_visit(node)
+        
+        return SceneTimingFixer(self).visit(tree)
 
 
 def test_ast_converter():
