@@ -267,12 +267,76 @@ def create_counting_animation(
     return number, count_anim
 
 
+class ShimmerIn(FadeIn):
+    """
+    Animation that shimmers/sparkles objects into existence.
+    
+    This is a compatibility implementation for ManimGL's ShimmerIn.
+    """
+    
+    def __init__(
+        self,
+        mobject: Mobject,
+        direction: np.ndarray = UP,
+        run_time: float = 1.0,
+        **kwargs
+    ):
+        super().__init__(mobject, shift=direction * 0.2, run_time=run_time, **kwargs)
+
+
+class CounterclockwiseTransform(Transform):
+    """
+    Transform that explicitly rotates counterclockwise.
+    
+    This is a compatibility wrapper for ManimGL's CounterclockwiseTransform.
+    """
+    
+    def __init__(
+        self,
+        mobject: Mobject,
+        target_mobject: Mobject,
+        path_arc: float = -PI/2,
+        **kwargs
+    ):
+        super().__init__(
+            mobject,
+            target_mobject,
+            path_arc=path_arc,
+            **kwargs
+        )
+
+
+class ClockwiseTransform(Transform):
+    """
+    Transform that explicitly rotates clockwise.
+    
+    This is a compatibility wrapper for ManimGL's ClockwiseTransform.
+    """
+    
+    def __init__(
+        self,
+        mobject: Mobject,
+        target_mobject: Mobject,
+        path_arc: float = PI/2,
+        **kwargs
+    ):
+        super().__init__(
+            mobject,
+            target_mobject,
+            path_arc=path_arc,
+            **kwargs
+        )
+
+
 # Export all custom animations
 __all__ = [
     'FlipThroughNumbers',
     'DelayByOrder',
     'CountingAnimation',
     'RotatingAnimation',
+    'ShimmerIn',
+    'CounterclockwiseTransform',
+    'ClockwiseTransform',
     'create_flip_through_numbers',
     'convert_continual_animation_to_updater',
     'create_delayed_animation',

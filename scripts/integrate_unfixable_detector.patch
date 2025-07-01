@@ -1,0 +1,88 @@
+--- enhanced_scene_converter.py.original
++++ enhanced_scene_converter.py
+@@ -56,6 +56,14 @@
+     AUTO_RECOVERY_AVAILABLE = False
+     ValidationFailureRecovery = None
+ 
++# Import unfixable pattern detector
++try:
++    from scripts.unfixable_pattern_detector import UnfixablePatternDetector, FixabilityLevel
++    UNFIXABLE_DETECTOR_AVAILABLE = True
++except ImportError:
++    logger.warning("Unfixable pattern detector not available")
++    UNFIXABLE_DETECTOR_AVAILABLE = False
++    UnfixablePatternDetector = None
+ 
+ class FunctionDependencyVisitor(ast.NodeVisitor):
+     """Helper visitor to analyze function bodies for dependencies."""
+@@ -290,6 +298,10 @@ class EnhancedSceneConverter:
+             logger.info("Auto-recovery enabled for validation failures")
+         else:
+             logger.info("Auto-recovery disabled - validation failure recovery not available")
++        
++        # Initialize unfixable pattern detector
++        self.unfixable_detector = UnfixablePatternDetector() if UNFIXABLE_DETECTOR_AVAILABLE else None
++        self.unfixable_stats = {'skipped': 0, 'attempted': 0, 'patterns': {}}
+     
+     def set_context(self, video_name: str = None, video_year: int = None):
+         """Set context for current video being processed."""
+@@ -878,15 +890,40 @@ class EnhancedSceneConverter:
+                     else:
+                         logger.info(f"Auto-recovery could not fix this error pattern - proceeding to Claude")
+                 
+-                # Auto-recovery failed or not attempted - try Claude if enabled
+-                if self.enable_claude_fixes and attempt < self.max_fix_attempts:
+-                    logger.info(f"Render failed for {scene_name}, attempting Claude fix (attempt {attempt}/{self.max_fix_attempts})")
++                # Check if this error is unfixable before calling Claude
++                should_skip_claude = False
++                skip_reason = ""
++                
++                if self.unfixable_detector:
++                    should_skip, skip_reason = self.unfixable_detector.should_skip_claude(
++                        current_snippet, 
++                        error_message, 
++                        attempt - 1  # Previous attempts count
++                    )
++                    should_skip_claude = should_skip
+                     
++                    if should_skip:
++                        logger.warning(f"Skipping Claude API call for {scene_name}: {skip_reason}")
++                        self.unfixable_stats['skipped'] += 1
++                        # Track the pattern
++                        level, issues = self.unfixable_detector.analyze_code(current_snippet, error_message)
++                        for issue in issues:
++                            category = issue.split(':')[0]
++                            self.unfixable_stats['patterns'][category] = self.unfixable_stats['patterns'].get(category, 0) + 1
++                        # Return failure immediately with explanation
++                        return {
++                            'success': False,
++                            'scene_name': scene_name,
++                            'render_time': 0,
++                            'error': error_message,
++                            'unfixable_reason': skip_reason,
++                            'unfixable_level': level.value
++                        }
++                
++                # Auto-recovery failed or not attempted - try Claude if enabled and not unfixable
++                if self.enable_claude_fixes and attempt < self.max_fix_attempts and not should_skip_claude:
++                    logger.info(f"Render failed for {scene_name}, attempting Claude fix (attempt {attempt}/{self.max_fix_attempts})")
++                    self.unfixable_stats['attempted'] += 1
++                    
+                     # Get additional context from precompile errors and pre-conversion validation
+                     additional_context = {
+                         'video_name': self._current_video_name if hasattr(self, '_current_video_name') else None,
+@@ -958,6 +995,13 @@ class EnhancedSceneConverter:
+         if self.auto_recovery:
+             return self.auto_recovery.get_statistics()
+         return None
++    
++    def get_unfixable_detector_statistics(self) -> Optional[Dict[str, Any]]:
++        """Get unfixable pattern detector statistics."""
++        if self.unfixable_detector:
++            stats = dict(self.unfixable_stats)
++            stats['detector_report'] = self.unfixable_detector.get_fixability_report()
++            return stats
++        return None
+
+
+ def test_enhanced_converter():

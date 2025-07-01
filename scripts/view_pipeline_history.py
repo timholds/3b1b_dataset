@@ -1,216 +1,224 @@
 #!/usr/bin/env python3
 """
-Utility script to view pipeline run history from the consolidated log.
-Provides various viewing options:
-- List all runs with summary
-- Show details of a specific run
-- Filter by date range
-- Show statistics
+View pipeline processing history from logs.json files.
+
+This script helps visualize what stages have been completed for each video
+and when they were processed.
 """
 
 import json
-import argparse
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime
+from typing import Dict, List, Optional
+import argparse
 
-def load_history(history_file: Path) -> List[Dict]:
-    """Load all pipeline runs from the history file."""
-    runs = []
-    if history_file.exists():
-        with open(history_file) as f:
-            for line in f:
-                try:
-                    runs.append(json.loads(line.strip()))
-                except json.JSONDecodeError:
-                    continue
-    return runs
 
-def format_duration(seconds: float) -> str:
-    """Format duration in human-readable format."""
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
+def format_timestamp(timestamp_str: str) -> str:
+    """Format ISO timestamp to readable format."""
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except:
+        return timestamp_str[:16] if len(timestamp_str) > 16 else timestamp_str
+
+
+def load_video_logs(video_dir: Path) -> Dict:
+    """Load logs from both possible locations."""
+    logs = {}
+    
+    # Check new location first
+    new_log_path = video_dir / 'logs.json'
+    if new_log_path.exists():
+        try:
+            with open(new_log_path, 'r') as f:
+                logs.update(json.load(f))
+        except:
+            pass
+    
+    # Check old location
+    old_log_path = video_dir / '.pipeline' / 'logs' / 'logs.json'
+    if old_log_path.exists():
+        try:
+            with open(old_log_path, 'r') as f:
+                old_logs = json.load(f)
+                # Merge, preferring old logs for duplicate keys
+                for key, value in old_logs.items():
+                    if key not in logs:
+                        logs[key] = value
+        except:
+            pass
+    
+    return logs
+
+
+def analyze_pipeline_history(base_dir: Path, year: Optional[int] = None, 
+                           video_filter: Optional[List[str]] = None) -> Dict:
+    """Analyze pipeline processing history across videos."""
+    outputs_dir = base_dir / 'outputs'
+    
+    if not outputs_dir.exists():
+        return {'error': 'No outputs directory found'}
+    
+    results = {
+        'years': {},
+        'summary': {
+            'total_videos': 0,
+            'stages_completed': {
+                'matching': 0,
+                'cleaning': 0,
+                'conversion': 0,
+                'rendering': 0
+            }
+        }
+    }
+    
+    # Determine which years to process
+    if year:
+        year_dirs = [outputs_dir / str(year)] if (outputs_dir / str(year)).exists() else []
     else:
-        return f"{seconds/3600:.1f}h"
+        year_dirs = [d for d in outputs_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+    
+    for year_dir in sorted(year_dirs):
+        year_num = int(year_dir.name)
+        year_data = {
+            'videos': {},
+            'total': 0,
+            'with_logs': 0
+        }
+        
+        # Process each video
+        for video_dir in sorted(year_dir.iterdir()):
+            if not video_dir.is_dir():
+                continue
+                
+            # Apply video filter if specified
+            if video_filter and video_dir.name not in video_filter:
+                continue
+            
+            year_data['total'] += 1
+            results['summary']['total_videos'] += 1
+            
+            # Load logs
+            logs = load_video_logs(video_dir)
+            
+            if logs:
+                year_data['with_logs'] += 1
+                
+                video_info = {
+                    'stages': {},
+                    'last_updated': None
+                }
+                
+                # Track latest timestamp
+                latest_timestamp = None
+                
+                # Process each stage
+                for stage in ['matching', 'cleaning', 'parameterized_conversion', 
+                            'conversion', 'rendering']:
+                    if stage in logs:
+                        stage_data = logs[stage]
+                        timestamp = stage_data.get('timestamp', '')
+                        
+                        video_info['stages'][stage] = {
+                            'completed': True,
+                            'timestamp': format_timestamp(timestamp)
+                        }
+                        
+                        # Track completion
+                        if stage in results['summary']['stages_completed']:
+                            results['summary']['stages_completed'][stage] += 1
+                        
+                        # Update latest timestamp
+                        if timestamp and (not latest_timestamp or timestamp > latest_timestamp):
+                            latest_timestamp = timestamp
+                
+                video_info['last_updated'] = format_timestamp(latest_timestamp) if latest_timestamp else 'Unknown'
+                year_data['videos'][video_dir.name] = video_info
+            else:
+                year_data['videos'][video_dir.name] = {
+                    'stages': {},
+                    'last_updated': 'No logs found'
+                }
+        
+        results['years'][year_num] = year_data
+    
+    return results
 
-def print_run_summary(run: Dict):
-    """Print a summary of a single pipeline run."""
-    start_time = run.get('start_time', 'Unknown')
-    if start_time != 'Unknown':
-        start_dt = datetime.fromisoformat(start_time)
-        start_time = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def print_history_report(results: Dict, detailed: bool = False):
+    """Print formatted history report."""
+    print("\n" + "="*80)
+    print("PIPELINE PROCESSING HISTORY")
+    print("="*80)
     
-    duration = run.get('duration_seconds', 0)
-    year = run.get('year', 'Unknown')
+    # Summary
+    summary = results['summary']
+    print(f"\nTotal videos found: {summary['total_videos']}")
+    print("\nStages completed:")
+    for stage, count in summary['stages_completed'].items():
+        percentage = (count / max(summary['total_videos'], 1)) * 100
+        print(f"  {stage.capitalize():20} {count:4d} ({percentage:5.1f}%)")
     
-    # Get stage statuses
-    stages = run.get('stages', {})
-    statuses = []
-    for stage_name in ['matching', 'cleaning', 'conversion', 'rendering']:
-        stage = stages.get(stage_name, {})
-        status = stage.get('status', 'unknown')
-        if status == 'completed':
-            symbol = '✓'
-        elif status == 'failed':
-            symbol = '✗'
-        elif status == 'skipped':
-            symbol = '-'
+    # Year-by-year breakdown
+    for year, year_data in sorted(results['years'].items()):
+        print(f"\n{'-'*80}")
+        print(f"Year {year}: {year_data['total']} videos ({year_data['with_logs']} with logs)")
+        
+        if detailed and year_data['videos']:
+            print(f"\nVideos:")
+            for video_name, video_info in sorted(year_data['videos'].items()):
+                stages = video_info['stages']
+                stage_markers = []
+                
+                for stage in ['matching', 'cleaning', 'conversion', 'rendering']:
+                    if stage in stages:
+                        stage_markers.append(stage[0].upper())
+                    else:
+                        stage_markers.append('-')
+                
+                stage_str = ''.join(stage_markers)
+                print(f"  {video_name:50} [{stage_str}] {video_info['last_updated']}")
         else:
-            symbol = '?'
-        statuses.append(f"{stage_name[0].upper()}{symbol}")
-    
-    status_str = ' '.join(statuses)
-    
-    print(f"{start_time} | Year: {year} | Duration: {format_duration(duration)} | {status_str}")
+            # Summary view
+            stage_counts = {'matching': 0, 'cleaning': 0, 'conversion': 0, 'rendering': 0}
+            
+            for video_info in year_data['videos'].values():
+                for stage in stage_counts:
+                    if stage in video_info['stages']:
+                        stage_counts[stage] += 1
+            
+            print("  Completed stages:")
+            for stage, count in stage_counts.items():
+                if count > 0:
+                    print(f"    {stage.capitalize():15} {count:3d}")
 
-def print_run_details(run: Dict):
-    """Print detailed information about a pipeline run."""
-    print("\n" + "="*80)
-    print(f"Pipeline Run Details")
-    print("="*80)
-    
-    start_time = run.get('start_time', 'Unknown')
-    if start_time != 'Unknown':
-        print(f"Start Time: {datetime.fromisoformat(start_time).strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    end_time = run.get('end_time', 'Unknown')
-    if end_time != 'Unknown':
-        print(f"End Time: {datetime.fromisoformat(end_time).strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    duration = run.get('duration_seconds', 0)
-    print(f"Duration: {format_duration(duration)}")
-    print(f"Year: {run.get('year', 'Unknown')}")
-    
-    print("\nStage Results:")
-    print("-" * 40)
-    
-    stages = run.get('stages', {})
-    for stage_name in ['matching', 'cleaning', 'conversion', 'rendering']:
-        stage = stages.get(stage_name, {})
-        status = stage.get('status', 'unknown')
-        stats = stage.get('stats', {})
-        
-        print(f"\n{stage_name.capitalize()}:")
-        print(f"  Status: {status}")
-        
-        if stats:
-            for key, value in stats.items():
-                print(f"  {key}: {value}")
-
-def show_statistics(runs: List[Dict]):
-    """Show overall statistics from all runs."""
-    print("\n" + "="*80)
-    print("Pipeline Statistics")
-    print("="*80)
-    
-    print(f"Total runs: {len(runs)}")
-    
-    if not runs:
-        return
-    
-    # Calculate statistics
-    total_duration = sum(r.get('duration_seconds', 0) for r in runs)
-    successful_runs = sum(1 for r in runs if all(
-        r.get('stages', {}).get(s, {}).get('status') in ['completed', 'skipped'] 
-        for s in ['matching', 'cleaning', 'conversion', 'rendering']
-    ))
-    
-    print(f"Successful runs: {successful_runs}/{len(runs)} ({successful_runs/len(runs)*100:.1f}%)")
-    print(f"Total processing time: {format_duration(total_duration)}")
-    print(f"Average run duration: {format_duration(total_duration/len(runs))}")
-    
-    # Stage statistics
-    print("\nStage Statistics:")
-    for stage_name in ['matching', 'cleaning', 'conversion', 'rendering']:
-        completed = sum(1 for r in runs if r.get('stages', {}).get(stage_name, {}).get('status') == 'completed')
-        failed = sum(1 for r in runs if r.get('stages', {}).get(stage_name, {}).get('status') == 'failed')
-        skipped = sum(1 for r in runs if r.get('stages', {}).get(stage_name, {}).get('status') == 'skipped')
-        
-        print(f"  {stage_name.capitalize()}: {completed} completed, {failed} failed, {skipped} skipped")
 
 def main():
-    parser = argparse.ArgumentParser(description='View pipeline run history')
-    parser.add_argument('--last', type=int, metavar='N',
-                        help='Show only the last N runs')
-    parser.add_argument('--days', type=int, metavar='N',
-                        help='Show runs from the last N days')
-    parser.add_argument('--detail', type=int, metavar='INDEX',
-                        help='Show detailed view of run at INDEX (0-based)')
-    parser.add_argument('--stats', action='store_true',
-                        help='Show overall statistics')
+    parser = argparse.ArgumentParser(
+        description='View pipeline processing history from logs'
+    )
     parser.add_argument('--year', type=int,
-                        help='Filter runs by year')
+                       help='Show history for specific year only')
+    parser.add_argument('--video', action='append',
+                       help='Show history for specific video(s) only')
+    parser.add_argument('--detailed', '-d', action='store_true',
+                       help='Show detailed video-by-video breakdown')
+    parser.add_argument('--json', action='store_true',
+                       help='Output raw JSON data')
     
     args = parser.parse_args()
     
-    # Load history
+    # Get base directory
     base_dir = Path(__file__).parent.parent
-    history_file = base_dir / 'output' / 'logs' / 'pipeline_history.jsonl'
     
-    if not history_file.exists():
-        print(f"No history file found at {history_file}")
-        print("Run the migration script first: python scripts/migrate_logs.py")
-        return
+    # Analyze history
+    results = analyze_pipeline_history(base_dir, year=args.year, video_filter=args.video)
     
-    runs = load_history(history_file)
-    
-    if not runs:
-        print("No pipeline runs found in history")
-        return
-    
-    # Filter by year if specified
-    if args.year:
-        runs = [r for r in runs if r.get('year') == args.year]
-        if not runs:
-            print(f"No runs found for year {args.year}")
-            return
-    
-    # Filter by days if specified
-    if args.days:
-        cutoff = datetime.now() - timedelta(days=args.days)
-        filtered_runs = []
-        for run in runs:
-            start_time = run.get('start_time')
-            if start_time:
-                try:
-                    run_dt = datetime.fromisoformat(start_time)
-                    if run_dt >= cutoff:
-                        filtered_runs.append(run)
-                except:
-                    pass
-        runs = filtered_runs
-    
-    # Limit to last N runs if specified
-    if args.last:
-        runs = runs[-args.last:]
-    
-    # Show detailed view if requested
-    if args.detail is not None:
-        if 0 <= args.detail < len(runs):
-            print_run_details(runs[args.detail])
-        else:
-            print(f"Invalid index {args.detail}. Valid range: 0-{len(runs)-1}")
-        return
-    
-    # Show statistics if requested
-    if args.stats:
-        show_statistics(runs)
-        return
-    
-    # Default: show summary list
-    print(f"\nPipeline Run History ({len(runs)} runs)")
-    print("="*80)
-    print("Date/Time            | Year | Duration | Status (M=Match, Cl=Clean, Co=Convert, R=Render)")
-    print("-"*80)
-    
-    for i, run in enumerate(runs):
-        print(f"[{i:3d}] ", end='')
-        print_run_summary(run)
-    
-    print("\nUse --detail INDEX to see details of a specific run")
-    print("Use --stats to see overall statistics")
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        print_history_report(results, detailed=args.detailed)
+
 
 if __name__ == '__main__':
     main()

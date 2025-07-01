@@ -1,106 +1,131 @@
 #!/usr/bin/env python3
 """
-One-time migration script to organize existing logs into the new structure.
-This script:
-1. Moves pipeline logs to output/logs/
-2. Archives old pipeline report JSONs to output/logs/archive/
-3. Keeps only the latest pipeline report JSON in the main output directory
-4. Creates a consolidated history from existing reports
+Migrate logs.json files from .pipeline/logs/ to the video root directory.
+
+This script fixes the path mismatch where:
+- build_dataset_pipeline.py saves to: video_dir/.pipeline/logs/logs.json
+- render_videos.py reads from: video_dir/logs.json
 """
 
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
-import shutil
 
-def migrate_logs(base_dir: Path):
-    """Migrate existing logs to the new organized structure."""
-    output_dir = base_dir / 'output'
+
+def migrate_logs(base_dir: Path, dry_run: bool = False):
+    """Migrate logs.json files from .pipeline/logs/ to video root directory."""
+    outputs_dir = base_dir / 'outputs'
     
-    # Create new directories
-    logs_dir = output_dir / 'logs'
-    logs_dir.mkdir(exist_ok=True)
+    if not outputs_dir.exists():
+        print("No outputs directory found.")
+        return
     
-    archive_dir = logs_dir / 'archive'
-    archive_dir.mkdir(exist_ok=True)
+    migrated_count = 0
+    already_exists_count = 0
+    error_count = 0
     
-    print("Starting log migration...")
+    # Iterate through all year directories
+    for year_dir in outputs_dir.iterdir():
+        if not year_dir.is_dir() or not year_dir.name.isdigit():
+            continue
+            
+        print(f"\nProcessing year {year_dir.name}...")
+        
+        # Iterate through all video directories
+        for video_dir in year_dir.iterdir():
+            if not video_dir.is_dir():
+                continue
+                
+            # Check for logs in old location
+            old_log_path = video_dir / '.pipeline' / 'logs' / 'logs.json'
+            new_log_path = video_dir / 'logs.json'
+            
+            if old_log_path.exists():
+                if new_log_path.exists():
+                    # Both exist - need to merge
+                    print(f"  {video_dir.name}: Both old and new logs exist, merging...")
+                    
+                    if not dry_run:
+                        try:
+                            # Load both log files
+                            with open(old_log_path, 'r') as f:
+                                old_logs = json.load(f)
+                            with open(new_log_path, 'r') as f:
+                                new_logs = json.load(f)
+                            
+                            # Merge logs (old logs take precedence for duplicate keys)
+                            merged_logs = {**new_logs, **old_logs}
+                            
+                            # Save merged logs
+                            with open(new_log_path, 'w') as f:
+                                json.dump(merged_logs, f, indent=2)
+                            
+                            # Remove old log file
+                            old_log_path.unlink()
+                            
+                            print(f"    ✓ Merged and migrated")
+                            migrated_count += 1
+                            
+                        except Exception as e:
+                            print(f"    ✗ Error merging logs: {e}")
+                            error_count += 1
+                    else:
+                        print(f"    [DRY RUN] Would merge logs")
+                        migrated_count += 1
+                        
+                else:
+                    # Only old exists - simple move
+                    print(f"  {video_dir.name}: Migrating logs...")
+                    
+                    if not dry_run:
+                        try:
+                            # Move the file
+                            shutil.move(str(old_log_path), str(new_log_path))
+                            print(f"    ✓ Migrated")
+                            migrated_count += 1
+                            
+                        except Exception as e:
+                            print(f"    ✗ Error migrating: {e}")
+                            error_count += 1
+                    else:
+                        print(f"    [DRY RUN] Would migrate")
+                        migrated_count += 1
+                        
+            elif new_log_path.exists():
+                # Only new exists - nothing to do
+                already_exists_count += 1
+            
+    # Summary
+    print(f"\n{'='*60}")
+    print("Migration Summary:")
+    print(f"  Migrated: {migrated_count}")
+    print(f"  Already in correct location: {already_exists_count}")
+    print(f"  Errors: {error_count}")
     
-    # 1. Move pipeline_logs directory contents to logs/
-    old_pipeline_logs = output_dir / 'pipeline_logs'
-    if old_pipeline_logs.exists():
-        print(f"Moving pipeline logs from {old_pipeline_logs} to {logs_dir}")
-        for log_file in old_pipeline_logs.glob('*.log'):
-            new_path = logs_dir / log_file.name
-            shutil.move(str(log_file), str(new_path))
-            print(f"  Moved: {log_file.name}")
-        
-        # Remove empty directory
-        old_pipeline_logs.rmdir()
-        print("  Removed old pipeline_logs directory")
+    if dry_run:
+        print("\n[DRY RUN] No files were actually moved. Run without --dry-run to perform migration.")
+
+
+def main():
+    import argparse
     
-    # 2. Find all pipeline report JSON files
-    report_files = list(output_dir.glob('pipeline_report_*_*.json'))
+    parser = argparse.ArgumentParser(
+        description='Migrate logs.json files from .pipeline/logs/ to video root directory'
+    )
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be done without actually moving files')
     
-    if report_files:
-        print(f"\nFound {len(report_files)} pipeline report JSON files")
-        
-        # Sort by modification time
-        report_files.sort(key=lambda p: p.stat().st_mtime)
-        
-        # Create consolidated history from all reports
-        consolidated_file = logs_dir / 'pipeline_history.jsonl'
-        print(f"Creating consolidated history at {consolidated_file}")
-        
-        with open(consolidated_file, 'w') as f:
-            for report_file in report_files:
-                try:
-                    with open(report_file) as rf:
-                        data = json.load(rf)
-                        # Add filename for reference
-                        data['_original_file'] = report_file.name
-                        f.write(json.dumps(data) + '\n')
-                except Exception as e:
-                    print(f"  Warning: Could not read {report_file.name}: {e}")
-        
-        # Archive all but the most recent report
-        latest_report = report_files[-1]
-        print(f"\nKeeping latest report: {latest_report.name}")
-        
-        # Rename latest to standard name
-        year_match = latest_report.name.split('_')[2]  # Extract year from filename
-        new_latest_path = output_dir / f'pipeline_report_{year_match}_latest.json'
-        shutil.copy2(str(latest_report), str(new_latest_path))
-        print(f"  Created: {new_latest_path.name}")
-        
-        # Archive all old reports
-        print("\nArchiving old reports...")
-        for report_file in report_files:
-            archive_path = archive_dir / report_file.name
-            shutil.move(str(report_file), str(archive_path))
-            print(f"  Archived: {report_file.name}")
+    args = parser.parse_args()
     
-    # 3. Move cleaning logs to logs/ subdirectory
-    cleaning_logs_dir = output_dir / 'cleaning_logs'
-    if cleaning_logs_dir.exists():
-        new_cleaning_logs = logs_dir / 'cleaning'
-        new_cleaning_logs.mkdir(exist_ok=True)
-        
-        print(f"\nMoving cleaning logs to {new_cleaning_logs}")
-        for item in cleaning_logs_dir.iterdir():
-            new_path = new_cleaning_logs / item.name
-            shutil.move(str(item), str(new_path))
-            print(f"  Moved: {item.name}")
-        
-        cleaning_logs_dir.rmdir()
-        print("  Removed old cleaning_logs directory")
+    # Get base directory
+    base_dir = Path(__file__).parent.parent
     
-    print("\nMigration complete!")
-    print(f"New structure:")
-    print(f"  - Logs: {logs_dir}/")
-    print(f"  - Archive: {archive_dir}/")
-    print(f"  - History: {logs_dir / 'pipeline_history.jsonl'}")
+    print("Migrating logs.json files...")
+    print(f"Base directory: {base_dir}")
+    
+    migrate_logs(base_dir, dry_run=args.dry_run)
+
 
 if __name__ == '__main__':
-    base_dir = Path(__file__).parent.parent
-    migrate_logs(base_dir)
+    main()

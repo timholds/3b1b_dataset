@@ -8,6 +8,10 @@ and patterns that appear frequently in the conversion process.
 
 import re
 from typing import Dict, List, Tuple, Optional
+from scripts.manimce_api_mappings import (
+    CLASS_MAPPINGS, METHOD_TO_PROPERTY_MAPPINGS, 
+    is_pi_creature_related, get_class_conversion
+)
 
 
 def convert_continual_animation_to_updater(content: str) -> str:
@@ -295,6 +299,106 @@ def create_simple_face(color=YELLOW, radius=1):
     )
     
     return content_with_helpers
+
+
+def remove_pi_creature_dependencies(content: str) -> str:
+    """
+    Remove all Pi Creature dependencies using comprehensive centralized lists.
+    Comments out Pi Creature classes, animations, methods, and helper functions.
+    """
+    # Centralized lists for maintainability
+    PI_CREATURE_CLASSES = [
+        'PiCreature', 'Randolph', 'Mortimer', 'ThoughtBubble', 'SpeechBubble',
+        'WaveArm', 'BlinkPiCreature', 'PiCreatureBubbleIntroduction'
+    ]
+    
+    PI_CREATURE_ANIMATIONS = [
+        'WaveArm', 'BlinkPiCreature', 'RemovePiCreatureBubble', 'PiCreatureBubbleIntroduction',
+        'Blink'  # When used with Pi Creatures
+    ]
+    
+    PI_CREATURE_HELPER_FUNCTIONS = [
+        'draw_you', 'create_pi_creature', 'make_pi_creature', 'get_pi_creature', 
+        'setup_pi_creature', 'get_bubble_introduction'
+    ]
+    
+    TEACHER_STUDENTS_METHODS = [
+        'student_says', 'teacher_says', 'student_thinks', 'teacher_thinks',
+        'play_student_changes', 'change_students', 'get_student_changes',
+        'random_blink_wait'
+    ]
+    
+    PI_CREATURE_INSTANCE_METHODS = [
+        'change', 'look_at', 'blink', 'wave', 'says', 'thinks', 'get_bubble',
+        'shift_onto_screen', 'change_mode', 'bubble_thought', 'bubble_speak'
+    ]
+    
+    lines = content.split('\n')
+    result_lines = []
+    
+    for line in lines:
+        # Check if line contains Pi Creature patterns
+        line_modified = False
+        
+        # 1. Check for Pi Creature class instantiations and animations
+        for class_name in PI_CREATURE_CLASSES:
+            if class_name in line and ('=' in line or 'self.play(' in line or 'self.add(' in line):
+                # Comment out Pi Creature instantiation or usage
+                indentation = len(line) - len(line.lstrip())
+                result_lines.append(' ' * indentation + f'# {line.strip()}  # Pi Creature - no ManimCE equivalent')
+                line_modified = True
+                break
+        
+        if line_modified:
+            continue
+            
+        # 2. Check for Pi Creature animations in play/add calls
+        for animation in PI_CREATURE_ANIMATIONS:
+            if animation in line and ('self.play(' in line or 'self.add(' in line):
+                # Comment out Pi Creature animation
+                indentation = len(line) - len(line.lstrip())
+                result_lines.append(' ' * indentation + f'# {line.strip()}  # Pi Creature animation - no ManimCE equivalent')
+                line_modified = True
+                break
+        
+        if line_modified:
+            continue
+            
+        # 3. Check for Pi Creature helper functions
+        helper_pattern = r'\s*def\s+(' + '|'.join(PI_CREATURE_HELPER_FUNCTIONS) + r')\s*\('
+        if re.match(helper_pattern, line):
+            # Comment out Pi Creature helper function definition
+            indentation = len(line) - len(line.lstrip())
+            result_lines.append(' ' * indentation + f'# {line.strip()}  # Pi Creature helper function - no ManimCE equivalent')
+            line_modified = True
+        
+        if line_modified:
+            continue
+            
+        # 4. Check for TeacherStudentsScene method calls
+        for method in TEACHER_STUDENTS_METHODS:
+            if f'self.{method}(' in line:
+                # Comment out TeacherStudentsScene method call
+                indentation = len(line) - len(line.lstrip())
+                result_lines.append(' ' * indentation + f'# {line.strip()}  # TeacherStudentsScene method - no ManimCE equivalent')
+                line_modified = True
+                break
+        
+        if line_modified:
+            continue
+            
+        # 5. Check for Pi Creature instance method calls
+        instance_method_pattern = r'\.\s*(' + '|'.join(PI_CREATURE_INSTANCE_METHODS) + r')\s*\('
+        if re.search(instance_method_pattern, line):
+            # Comment out Pi Creature instance method call
+            indentation = len(line) - len(line.lstrip())
+            result_lines.append(' ' * indentation + f'# {line.strip()}  # Pi Creature method - no ManimCE equivalent')
+            line_modified = True
+        
+        if not line_modified:
+            result_lines.append(line)
+    
+    return '\n'.join(result_lines)
 
 
 def convert_frame_constants(content: str) -> str:
@@ -621,6 +725,35 @@ def convert_manimgl_imports(content: str) -> str:
 
 def fix_common_import_errors(content: str):
     """Fix common import errors based on error patterns."""
+    # Import the list of imports to remove
+    try:
+        from scripts.api_mappings import IMPORTS_TO_REMOVE
+    except ImportError:
+        # Fallback list if import fails
+        IMPORTS_TO_REMOVE = [
+            'import displayer as disp',
+            'from displayer import *',
+            'import constants',
+            'from constants import *',
+            'import helpers',
+            'from helpers import *',
+        ]
+    
+    # First, remove/comment out problematic imports
+    lines = content.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        stripped_line = line.strip()
+        # Check if this is a problematic import
+        if any(imp in stripped_line for imp in IMPORTS_TO_REMOVE):
+            # Comment out instead of removing to preserve line numbers
+            cleaned_lines.append(f"# {line}  # Removed ManimGL-specific import")
+        else:
+            cleaned_lines.append(line)
+    
+    content = '\n'.join(cleaned_lines)
+    
     # Add missing essential imports if not present
     if 'from manim import' not in content and 'import manim' not in content:
         # Find first import or start of file
@@ -689,12 +822,17 @@ def add_missing_base_methods(content: str) -> str:
     scene_classes = re.findall(r'class\s+(\w+)\(.*Scene.*?\):', content)
     
     for scene_class in scene_classes:
-        # Check if construct method exists
-        if not re.search(rf'class\s+{scene_class}.*?def\s+construct\s*\(', content, re.DOTALL):
-            # Find the class and add construct method
-            class_pattern = rf'(class\s+{scene_class}\(.*?\):)'
-            replacement = r'\1\n    def construct(self):\n        pass  # TODO: Implement scene construction\n'
-            content = re.sub(class_pattern, replacement, content)
+        # More robust check for existing construct method within the class
+        # Find the class definition and check if it already has a construct method
+        class_match = re.search(rf'class\s+{scene_class}\(.*?\):(.*?)(?=\nclass|\Z)', content, re.DOTALL)
+        if class_match:
+            class_body = class_match.group(1)
+            # Check if construct method exists within this specific class body
+            if not re.search(r'def\s+construct\s*\(', class_body):
+                # Find the class and add construct method
+                class_pattern = rf'(class\s+{scene_class}\(.*?\):)'
+                replacement = r'\1\n    def construct(self):\n        pass  # TODO: Implement scene construction\n'
+                content = re.sub(class_pattern, replacement, content, count=1)  # Only replace first occurrence
     
     return content
 
@@ -840,6 +978,34 @@ def convert_class_names(content: str) -> str:
     return content
 
 
+def fix_arrow_parameters(content: str) -> str:
+    """Fix Arrow parameter mappings from ManimGL to ManimCE.
+    
+    ManimGL: Arrow(tail=point1, tip=point2)
+    ManimCE: Arrow(start=point1, end=point2)
+    """
+    # Pattern to match Arrow with tail/tip parameters
+    arrow_patterns = [
+        # Arrow(tail=..., tip=...)
+        (r'Arrow\s*\(\s*tail\s*=\s*([^,\)]+),\s*tip\s*=\s*([^,\)]+)\)',
+         r'Arrow(start=\1, end=\2)'),
+        # Arrow(tip=..., tail=...)  (reversed order)
+        (r'Arrow\s*\(\s*tip\s*=\s*([^,\)]+),\s*tail\s*=\s*([^,\)]+)\)',
+         r'Arrow(start=\2, end=\1)'),
+        # Arrow with additional parameters
+        (r'Arrow\s*\(\s*tail\s*=\s*([^,\)]+),\s*tip\s*=\s*([^,\)]+),\s*([^)]+)\)',
+         r'Arrow(start=\1, end=\2, \3)'),
+        (r'Arrow\s*\(\s*tip\s*=\s*([^,\)]+),\s*tail\s*=\s*([^,\)]+),\s*([^)]+)\)',
+         r'Arrow(start=\2, end=\1, \3)'),
+    ]
+    
+    fixed = content
+    for pattern, replacement in arrow_patterns:
+        fixed = re.sub(pattern, replacement, fixed)
+    
+    return fixed
+
+
 def apply_all_conversions(content: str) -> str:
     """Apply all conversion utilities to the content."""
     conversions = [
@@ -847,6 +1013,7 @@ def apply_all_conversions(content: str) -> str:
         fix_tex_parenthesis_bug,  # FIX: Apply BEFORE class name conversion to avoid double parenthesis
         convert_manimgl_imports,  # Convert imports first
         fix_common_import_errors,  # NEW: Fix imports early
+        convert_latex_strings,  # Convert OldTex with list args BEFORE class name conversion
         convert_class_names,  # Convert class names
         convert_parameterized_scenes,  # NEW: Convert parameterized construct methods
         convert_continual_animation_to_updater,
@@ -854,6 +1021,7 @@ def apply_all_conversions(content: str) -> str:
         fix_color_constant_errors,  # NEW: More comprehensive color fixes
         convert_old_methods,
         fix_method_signature_mismatches,  # NEW: Fix method signatures
+        fix_arrow_parameters,  # NEW: Fix Arrow tail/tip to start/end
         convert_transform_animations,
         convert_3d_scene_methods,
         add_config_dict_conversion,
@@ -862,7 +1030,7 @@ def apply_all_conversions(content: str) -> str:
         add_missing_base_methods,  # NEW: Add missing methods
         add_path_functions,  # NEW: Add path function implementations
         add_utility_functions,  # NEW: Add utility functions
-        suggest_pi_creature_replacement,
+        remove_pi_creature_dependencies,  # NEW: Comprehensive Pi Creature removal
     ]
     
     result = content
@@ -887,17 +1055,48 @@ def convert_latex_strings(content: str) -> str:
     
     Old: TextMobject("$x^2$")
     New: MathTex("x^2")
+    
+    Also handles OldTex with list arguments.
     """
     # Pattern for TextMobject with LaTeX
     pattern = r'TextMobject\(\s*["\'](\$[^"\']+\$)["\']'
     
     def replace_latex(match):
         latex_content = match.group(1)
-        # Remove dollar signs
+        # ManimCE's MathTex expects LaTeX without dollar signs
+        # Strip outer dollar signs
         clean_latex = latex_content.strip('$')
+        
+        # However, some symbols like \Leftrightarrow need to be in math mode
+        # Check if the content has LaTeX commands that require math mode
+        math_mode_required = any(cmd in clean_latex for cmd in [
+            r'\Leftrightarrow', r'\Rightarrow', r'\Leftarrow', 
+            r'\leftrightarrow', r'\rightarrow', r'\leftarrow',
+            r'\iff', r'\implies', r'\therefore', r'\because'
+        ])
+        
+        if math_mode_required and '$' not in clean_latex:
+            # Wrap in dollar signs for math mode
+            clean_latex = f'${clean_latex}$'
+            
         return f'MathTex("{clean_latex}"'
     
     content = re.sub(pattern, replace_latex, content)
+    
+    # Handle OldTex with list arguments BEFORE class name conversion
+    # OldTex(SOME_LIST) -> MathTex(*SOME_LIST) for math content
+    content = re.sub(
+        r'\bOldTex\(([A-Z_]+(?:_TEXT|_LIST)?)\)',
+        r'MathTex(*\1)',
+        content
+    )
+    
+    # OldTex with size parameter
+    content = re.sub(
+        r'\bOldTex\(([A-Z_]+(?:_TEXT|_LIST)?),\s*size\s*=\s*[^)]+\)',
+        r'MathTex(*\1)',
+        content
+    )
     
     # Fix Tex/MathTex with list/constant arguments - add unpacking
     # For variables that likely contain math content based on their names

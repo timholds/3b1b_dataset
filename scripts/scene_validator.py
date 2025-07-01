@@ -135,15 +135,15 @@ class SceneValidator:
                         else:
                             found_imports.add(f"from {node.module} import {alias.name}")
         
-        # Check for required imports
-        has_manim_import = any('manimlib' in imp for imp in found_imports)
+        # Check for required imports (manimlib or manim_imports_ext)
+        has_manim_import = any('manimlib' in imp or 'manim_imports_ext' in imp for imp in found_imports)
         
         if not has_manim_import:
             result.add_issue(ValidationIssue(
                 severity='error',
                 issue_type='missing_import',
-                message="No manimlib import found",
-                suggestion="Add 'from manimlib import *' at the beginning of the file"
+                message="No manimlib or manim_imports_ext import found",
+                suggestion="Add 'from manimlib import *' or 'from manim_imports_ext import *' at the beginning of the file"
             ))
             result.imports_complete = False
         

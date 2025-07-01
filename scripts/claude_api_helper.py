@@ -20,12 +20,21 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import time
+from datetime import datetime
+import hashlib
+import uuid
 
 # Import model strategy
 from model_strategy import get_model_for_task
 
+# Import enhanced logging
+from enhanced_logging_system import ClaudeAPIMetrics, create_claude_metrics
+
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Fix logging directory
+FIX_LOG_DIR = Path(__file__).parent.parent / "data" / "claude_fixes"
 
 
 class ClaudeErrorFixer:
@@ -33,7 +42,7 @@ class ClaudeErrorFixer:
     
     def __init__(self, verbose: bool = False, model: str = "opus", 
                  timeout: int = 120, max_attempts: int = 3,
-                 use_model_strategy: bool = True):
+                 use_model_strategy: bool = True, log_fixes: bool = True):
         """
         Initialize the Claude error fixer.
         
@@ -43,14 +52,20 @@ class ClaudeErrorFixer:
             timeout: Timeout for Claude command in seconds
             max_attempts: Maximum number of fix attempts
             use_model_strategy: Whether to use smart model selection
+            log_fixes: Whether to log all fixes to disk for pattern extraction
         """
         self.verbose = verbose
         self.model = model
         self.timeout = timeout
         self.max_attempts = max_attempts
         self.use_model_strategy = use_model_strategy
+        self.log_fixes = log_fixes
         self.fix_history = []  # Track successful fixes
         self.failed_attempts = {}  # Track what didn't work
+        
+        # Ensure fix log directory exists
+        if self.log_fixes:
+            FIX_LOG_DIR.mkdir(parents=True, exist_ok=True)
         
     def fix_render_error(self, scene_name: str, snippet_content: str, 
                         error_message: str, attempt_number: int = 1,
@@ -105,11 +120,17 @@ class ClaudeErrorFixer:
                     result['changes_made'] = self._analyze_changes(snippet_content, fixed_content)
                     
                     # Record successful fix for learning
-                    self.fix_history.append({
+                    fix_data = {
                         'error_pattern': self._extract_error_pattern(error_message),
                         'fix_summary': result['changes_made'],
                         'attempt': attempt_number
-                    })
+                    }
+                    self.fix_history.append(fix_data)
+                    
+                    # Log fix to disk for pattern extraction
+                    if self.log_fixes:
+                        self._log_fix_to_disk(scene_name, snippet_content, fixed_content, 
+                                            error_message, fix_data, additional_context)
                 else:
                     result['error'] = "Claude did not make any changes"
                     # Include error details if available
@@ -211,6 +232,24 @@ class ClaudeErrorFixer:
         
         # Add additional context if provided
         if additional_context:
+            # Pre-conversion validation insights
+            if 'pre_conversion_validation' in additional_context:
+                pre_val = additional_context['pre_conversion_validation']
+                prompt_parts.extend([
+                    "## Pre-Conversion Analysis:",
+                    f"Conversion confidence: {pre_val.get('confidence', 0):.1%}",
+                    f"Known issues: {pre_val.get('error_count', 0)} errors, {pre_val.get('warning_count', 0)} warnings",
+                    ""
+                ])
+                
+                if pre_val.get('top_issues'):
+                    prompt_parts.append("Top identified issues:")
+                    for issue in pre_val['top_issues'][:3]:
+                        prompt_parts.append(f"- Line {issue['line']}: {issue['message']}")
+                        if issue.get('suggestion'):
+                            prompt_parts.append(f"  Suggestion: {issue['suggestion']}")
+                    prompt_parts.append("")
+            
             if 'original_scene_content' in additional_context:
                 prompt_parts.extend([
                     "## Original Scene Code (before conversion):",
@@ -290,6 +329,10 @@ class ClaudeErrorFixer:
     
     def _run_claude_fix(self, prompt: str, file_path: Path) -> Optional[str]:
         """Run Claude CLI to fix the code."""
+        # Generate unique call ID for tracking
+        call_id = str(uuid.uuid4())[:8]
+        start_time = time.time()
+        
         try:
             # Get appropriate model based on strategy or use configured model
             if self.use_model_strategy:
@@ -303,6 +346,9 @@ class ClaudeErrorFixer:
             else:
                 model = self.model
                 
+            # Estimate prompt tokens (rough approximation)
+            prompt_tokens = len(prompt.split()) * 1.3  # Rough token estimate
+            
             # Use the model selected
             cmd = ["claude", "--dangerously-skip-permissions", "--model", model]
             
@@ -348,18 +394,66 @@ class ClaudeErrorFixer:
                 stderr = result.stderr
                 stdout = result.stdout
             
+            response_time = time.time() - start_time
+            
             if returncode == 0:
                 # Read the potentially modified file
                 if file_path.exists():
                     with open(file_path, 'r') as f:
-                        return f.read()
+                        fixed_content = f.read()
+                    
+                    # Estimate completion tokens
+                    completion_tokens = len(fixed_content.split()) * 1.3
+                    total_tokens = prompt_tokens + completion_tokens
+                    
+                    # Create and log API metrics
+                    metrics = create_claude_metrics(
+                        call_id=call_id,
+                        model=model,
+                        success=True,
+                        response_time=response_time
+                    )
+                    metrics.prompt_tokens = int(prompt_tokens)
+                    metrics.completion_tokens = int(completion_tokens)
+                    metrics.total_tokens = int(total_tokens)
+                    
+                    # Store metrics for potential logging by caller
+                    if hasattr(self, 'last_api_metrics'):
+                        self.last_api_metrics = metrics
+                    
+                    logger.info(f"Claude fix completed (call_id: {call_id}, tokens: {int(total_tokens)}, time: {response_time:.1f}s)")
+                    return fixed_content
                 else:
                     logger.error("File not found after Claude edit")
+                    
+                    # Log failure metrics
+                    metrics = create_claude_metrics(
+                        call_id=call_id,
+                        model=model,
+                        success=False,
+                        response_time=response_time,
+                        error="File not found after edit"
+                    )
+                    if hasattr(self, 'last_api_metrics'):
+                        self.last_api_metrics = metrics
+                        
                     return None
             else:
                 logger.error(f"Claude returned non-zero exit code: {returncode}")
                 if stderr:
                     logger.error(f"Claude stderr: {stderr}")
+                
+                # Log failure metrics
+                metrics = create_claude_metrics(
+                    call_id=call_id,
+                    model=model,
+                    success=False,
+                    response_time=response_time,
+                    error=f"Exit code {returncode}: {stderr}"
+                )
+                if hasattr(self, 'last_api_metrics'):
+                    self.last_api_metrics = metrics
+                
                 # Store error details in result
                 self.last_error_details = {
                     'stdout': stdout if 'stdout' in locals() else '',
@@ -369,10 +463,36 @@ class ClaudeErrorFixer:
                 return None
                 
         except subprocess.TimeoutExpired:
+            response_time = time.time() - start_time
             logger.error(f"Claude fix timed out after {self.timeout} seconds")
+            
+            # Log timeout metrics
+            metrics = create_claude_metrics(
+                call_id=call_id,
+                model=model,
+                success=False,
+                response_time=response_time,
+                error=f"Timeout after {self.timeout}s"
+            )
+            if hasattr(self, 'last_api_metrics'):
+                self.last_api_metrics = metrics
+                
             return None
         except Exception as e:
+            response_time = time.time() - start_time
             logger.error(f"Error running Claude: {str(e)}")
+            
+            # Log exception metrics
+            metrics = create_claude_metrics(
+                call_id=call_id,
+                model=model,
+                success=False,
+                response_time=response_time,
+                error=str(e)
+            )
+            if hasattr(self, 'last_api_metrics'):
+                self.last_api_metrics = metrics
+                
             return None
     
     def _extract_error_pattern(self, error_message: str) -> str:
@@ -468,6 +588,93 @@ class ClaudeErrorFixer:
                 fix_counts[change] = fix_counts.get(change, 0) + 1
         
         stats['successful_patterns'] = dict(sorted(fix_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+        
+        return stats
+    
+    def _log_fix_to_disk(self, scene_name: str, original_content: str, 
+                        fixed_content: str, error_message: str, 
+                        fix_data: Dict, additional_context: Optional[Dict] = None):
+        """Log a fix to disk for later pattern analysis."""
+        # Create unique ID for this fix
+        timestamp = datetime.now().isoformat()
+        content_hash = hashlib.md5(original_content.encode()).hexdigest()[:8]
+        fix_id = f"{scene_name}_{timestamp.replace(':', '-')}_{content_hash}"
+        
+        # Create log entry
+        log_entry = {
+            'fix_id': fix_id,
+            'timestamp': timestamp,
+            'scene_name': scene_name,
+            'error_message': error_message,
+            'error_pattern': fix_data['error_pattern'],
+            'fix_summary': fix_data['fix_summary'],
+            'attempt_number': fix_data['attempt'],
+            'model_used': self.model,
+            'original_line_count': len(original_content.splitlines()),
+            'fixed_line_count': len(fixed_content.splitlines()),
+            'diff_stats': self._compute_diff_stats(original_content, fixed_content)
+        }
+        
+        # Add additional context if provided
+        if additional_context:
+            log_entry['context'] = {
+                'dependencies': additional_context.get('dependencies', {}),
+                'video_year': additional_context.get('video_year'),
+                'video_name': additional_context.get('video_name')
+            }
+        
+        # Save files
+        fix_dir = FIX_LOG_DIR / fix_id
+        fix_dir.mkdir(exist_ok=True)
+        
+        # Save original content
+        with open(fix_dir / "original.py", 'w') as f:
+            f.write(original_content)
+        
+        # Save fixed content
+        with open(fix_dir / "fixed.py", 'w') as f:
+            f.write(fixed_content)
+        
+        # Save metadata
+        with open(fix_dir / "metadata.json", 'w') as f:
+            json.dump(log_entry, f, indent=2)
+        
+        # Also append to daily log file
+        daily_log = FIX_LOG_DIR / f"fixes_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        with open(daily_log, 'a') as f:
+            f.write(json.dumps(log_entry) + '\n')
+    
+    def _compute_diff_stats(self, original: str, fixed: str) -> Dict[str, int]:
+        """Compute statistics about the differences."""
+        stats = {
+            'lines_added': 0,
+            'lines_removed': 0,
+            'lines_modified': 0,
+            'imports_changed': False,
+            'methods_changed': 0,
+            'classes_changed': 0
+        }
+        
+        # Basic line diff
+        orig_lines = set(original.splitlines())
+        fixed_lines = set(fixed.splitlines())
+        
+        stats['lines_added'] = len(fixed_lines - orig_lines)
+        stats['lines_removed'] = len(orig_lines - fixed_lines)
+        
+        # Check specific changes
+        if ('from manim import' in fixed) != ('from manim import' in original):
+            stats['imports_changed'] = True
+        
+        # Count method/class changes (simple heuristic)
+        import re
+        orig_methods = len(re.findall(r'def \w+', original))
+        fixed_methods = len(re.findall(r'def \w+', fixed))
+        stats['methods_changed'] = abs(fixed_methods - orig_methods)
+        
+        orig_classes = len(re.findall(r'class \w+', original))
+        fixed_classes = len(re.findall(r'class \w+', fixed))
+        stats['classes_changed'] = abs(fixed_classes - orig_classes)
         
         return stats
 

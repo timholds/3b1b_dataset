@@ -193,8 +193,9 @@ class SceneCombiner:
                 
             # Handle constants (simple assignments at module level)
             if '=' in stripped and not in_class and not in_function:
-                # Check if it looks like a constant
-                if re.match(r'^[A-Z_]+\s*=', stripped) or re.match(r'^\w+\s*=\s*[\[\{\(]', stripped):
+                # Check if it looks like a constant (but exclude indented code)
+                if ((re.match(r'^[A-Z_]+\s*=', stripped) or re.match(r'^\w+\s*=\s*[\[\{\(]', stripped)) and
+                    not line.startswith((' ', '\t'))):  # Exclude indented code
                     result['constants'].append(line)
                     i += 1
                     continue

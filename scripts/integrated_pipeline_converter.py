@@ -31,6 +31,67 @@ from conversion_error_collector import collect_conversion_error
 logger = logging.getLogger(__name__)
 
 
+def reset_conversion_status(base_dir: Path, year: int, video_filter: Optional[List[str]] = None):
+    """
+    Reset conversion status for all videos in a year when --force-convert is used.
+    
+    This ensures that if a previous conversion run was interrupted (e.g., by rate limiting),
+    the next run will properly restart from the beginning rather than having mixed state.
+    
+    Args:
+        base_dir: Base directory of the project
+        year: Year to reset conversion status for
+        video_filter: Optional list of specific videos to reset (if None, resets all)
+    """
+    output_dir = base_dir / 'outputs' / str(year)
+    if not output_dir.exists():
+        logger.warning(f"Output directory does not exist: {output_dir}")
+        return
+        
+    videos_reset = 0
+    
+    for video_dir in output_dir.iterdir():
+        if not video_dir.is_dir():
+            continue
+            
+        # Apply video filter if specified
+        if video_filter and video_dir.name not in video_filter:
+            continue
+            
+        # Remove conversion outputs to reset status
+        files_to_remove = [
+            video_dir / 'manimce_code.py',
+            video_dir / 'conversion_results.json',
+            video_dir / 'validated_snippets'
+        ]
+        
+        removed_any = False
+        for file_path in files_to_remove:
+            if file_path.exists():
+                if file_path.is_dir():
+                    # Remove directory and all contents
+                    import shutil
+                    shutil.rmtree(file_path)
+                    logger.debug(f"Removed directory: {file_path}")
+                else:
+                    # Remove file
+                    file_path.unlink()
+                    logger.debug(f"Removed file: {file_path}")
+                removed_any = True
+                
+        if removed_any:
+            videos_reset += 1
+            logger.debug(f"Reset conversion status for video: {video_dir.name}")
+            
+    logger.info(f"Reset conversion status for {videos_reset} videos")
+    
+    # Also remove year-level conversion summary to force regeneration
+    summary_file = base_dir / 'outputs' / f'integrated_conversion_summary_{year}.json'
+    if summary_file.exists():
+        summary_file.unlink()
+        logger.info(f"Removed year-level conversion summary: {summary_file.name}")
+
+
 class IntegratedPipelineConverter:
     """
     Drop-in replacement for the conversion stage that integrates snippet extraction,
@@ -100,7 +161,7 @@ class IntegratedPipelineConverter:
         scenes_dir = video_dir / 'cleaned_scenes'
         if not scenes_dir.exists():
             # Try monolithic file
-            cleaned_file = video_dir / 'cleaned_code.py'
+            cleaned_file = video_dir / 'monolith_manimgl.py'
             if cleaned_file.exists():
                 # Extract scenes from monolithic file
                 result_scenes = self._process_monolithic_file(cleaned_file, video_dir)
@@ -212,7 +273,7 @@ class IntegratedPipelineConverter:
         
     def _process_scene_files(self, scenes_dir: Path, video_dir: Path) -> Dict[str, Any]:
         """Process individual scene files from cleaned_scenes directory."""
-        scene_files = list(scenes_dir.glob('*_scene_*.py'))
+        scene_files = list(scenes_dir.glob('*.py'))
         
         if not scene_files:
             logger.warning(f"No scene files found in {scenes_dir}")
@@ -368,12 +429,8 @@ class IntegratedPipelineConverter:
         
     def _extract_scene_name(self, scene_file: Path) -> str:
         """Extract scene name from filename."""
-        # Pattern: video_name_scene_SceneName.py
-        stem = scene_file.stem
-        parts = stem.split('_scene_')
-        if len(parts) > 1:
-            return parts[1]
-        return stem
+        # For files like DivergentSum.py, FinalSlide.py, etc.
+        return scene_file.stem
         
     def _save_snippet(self, video_dir: Path, scene_name: str, 
                      snippet_content: str, metadata: Dict[str, Any]) -> Path:
@@ -505,6 +562,11 @@ def integrate_with_pipeline(pipeline_builder, year: int, video_filter: Optional[
         max_workers=4
     )
     
+    # If force=True, reset all conversion statuses for the year before starting
+    if force:
+        logger.info("Force conversion enabled - resetting all video conversion statuses...")
+        reset_conversion_status(pipeline_builder.base_dir, year, video_filter)
+    
     # Get list of videos to process
     year_dir = pipeline_builder.output_dir / str(year)
     if not year_dir.exists():
@@ -519,7 +581,12 @@ def integrate_with_pipeline(pipeline_builder, year: int, video_filter: Optional[
     logger.info(f"Processing {len(video_dirs)} videos")
     
     all_results = {}
-    for video_dir in video_dirs:
+    for i, video_dir in enumerate(video_dirs, 1):
+        if converter.verbose:
+            print(f"\n{'='*80}")
+            print(f"📁 Video {i}/{len(video_dirs)}: {video_dir.name}")
+            print(f"{'='*80}")
+        logger.info(f"Converting video: {video_dir.name}")
         # Check if already converted (unless forcing)
         if not force:
             manimce_file = video_dir / 'manimce_code.py'
@@ -533,17 +600,64 @@ def integrate_with_pipeline(pipeline_builder, year: int, video_filter: Optional[
         all_results[video_dir.name] = result
         
         # Log progress
+        if converter.verbose:
+            success_count = sum(1 for s in result.get('scenes', {}).values() 
+                              if isinstance(s, dict) and s.get('success', False))
+            total_scenes = len(result.get('scenes', {}))
+            print(f"\n📊 Video {video_dir.name} Summary:")
+            print(f"   ✅ {success_count}/{total_scenes} scenes successful")
+            print(f"   📄 {result['snippets_created']} snippets created")
+            print(f"   🎯 Status: {result['status']}")
+            if result.get('errors'):
+                print(f"   ⚠️  {len(result['errors'])} errors occurred")
+            print(f"   📁 Combined file: {'✅' if result.get('combined_file') else '❌'}")
+        
         logger.info(f"Converted {video_dir.name}: {result['snippets_created']} snippets created, "
                    f"status: {result['status']}")
         
     # Get final statistics
     stats = converter.get_statistics()
     
+    # Clean all_results to remove non-serializable objects
+    cleaned_results = {}
+    for video_name, video_result in all_results.items():
+        cleaned_video_result = {
+            'video_name': video_result.get('video_name'),
+            'status': video_result.get('status'),
+            'snippets_created': video_result.get('snippets_created'),
+            'all_scenes_valid': video_result.get('all_scenes_valid'),
+            'combined_file': video_result.get('combined_file'),
+            'errors': video_result.get('errors', []),
+            'scene_count': len(video_result.get('scenes', {})),
+            'scenes': {}
+        }
+        
+        # Clean scene results
+        for scene_name, scene_data in video_result.get('scenes', {}).items():
+            if isinstance(scene_data, dict):
+                cleaned_scene = {
+                    'success': scene_data.get('success', False),
+                    'snippet_path': scene_data.get('snippet_path'),
+                    'validation': {
+                        'precompile': scene_data.get('validation', {}).get('precompile', {}).get('success', False),
+                        'render': scene_data.get('validation', {}).get('render', {}).get('success', False)
+                    },
+                    'dependencies': {
+                        'functions': scene_data.get('dependencies', {}).get('functions', 0),
+                        'classes': scene_data.get('dependencies', {}).get('classes', 0),
+                        'constants': scene_data.get('dependencies', {}).get('constants', 0)
+                    },
+                    'claude_fixes_applied': scene_data.get('claude_fixes_applied', 0)
+                }
+                cleaned_video_result['scenes'][scene_name] = cleaned_scene
+                
+        cleaned_results[video_name] = cleaned_video_result
+    
     # Create summary
     summary = {
         'year': year,
         'stats': stats,
-        'videos': all_results,
+        'videos': cleaned_results,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
     }
     

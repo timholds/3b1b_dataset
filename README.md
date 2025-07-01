@@ -33,17 +33,25 @@ The manim code files are not neatly organized to correspond 1:1 to a video. some
 ### # Create single file out of the code
 We want to have exactly one file per video, so if there are imports we should inline the code from those imports.
 
-**✅ SIGNIFICANTLY IMPROVED**: The v4 matching script (`match_videos_to_code_v4.py`) automatically inlines local imports with much better success rates. Recent enhancements handle imports inside functions, CONFIG dictionaries, and complex variable assignments. Files achieve good self-containment with minimal manual cleanup needed. See `IMPORT_INLINING.md` for detailed documentation. 
+**✅ COMPLETED**: The v4 matching script (`match_videos_to_code_v4.py`) automatically inlines local imports with excellent success rates. The pipeline now includes:
+- AST-based converter handling 90%+ of mechanical conversions
+- Validation auto-recovery fixing 90% of common errors before Claude
+- Helper modules for constants, animations, and utility functions
+- Individual snippet generation for better error isolation 
 
 We should ultra think about the best way to match up the code to the videos. We don’t want any false positives - its critical that if we are unsure of whether the code goes with a video, we should mark it as such and withhold it for human review
 
 Stage 1: output structure 
 ```
-youtube_video_title
-- metadata.txt
-    - length of video, date published, topics, keywords, etc
-- scenes
-    - one single manimGL file that contains all of the scenes in the video
+youtube_video_title/
+├── metadata.json           # video metadata
+├── cleaned_scenes/         # individual cleaned ManimGL scenes
+├── validated_snippets/     # [PRIMARY OUTPUT] self-contained ManimCE snippets
+│   ├── Scene1.py          # self-contained, runnable scene
+│   ├── Scene2.py          # self-contained, runnable scene
+│   └── metadata.json      # snippet metadata
+├── monolith_manimce.py    # combined file (for backwards compatibility)
+└── rendered_videos/        # rendered validation videos
 ```  
 
 ## Verify and Validate (strenuous):

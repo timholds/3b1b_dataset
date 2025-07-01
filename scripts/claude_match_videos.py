@@ -91,8 +91,9 @@ class ClaudeVideoMatcher:
     def create_matching_prompt(self, video_info: Dict, transcript: str, title: str, year: int) -> str:
         """Create a prompt for Claude to find matching code files."""
         
-        # Make output path absolute to avoid confusion
-        output_path = self.output_dir / str(year) / video_info['caption_dir'] / "matches.json"
+        # Make output path absolute to avoid confusion (new structure)
+        video_dir = self.output_dir / str(year) / video_info['caption_dir']
+        output_path = video_dir / ".pipeline" / "source" / "matches.json"
         output_path_str = str(output_path)
         
         return f"""You are helping match 3Blue1Brown videos to their Manim source code.
@@ -229,7 +230,7 @@ Please search thoroughly and provide the most accurate match possible."""
                 f.write(result.stdout)
             
             return {
-                "status": "completed",
+                "process_status": "completed",
                 "prompt_file": str(prompt_file),
                 "result_file": str(result_file),
                 "video_id": video_id,
@@ -239,7 +240,7 @@ Please search thoroughly and provide the most accurate match possible."""
         except FileNotFoundError:
             print(f"  ❌ Claude CLI not found. Please install it first.")
             return {
-                "status": "error",
+                "process_status": "error",
                 "prompt_file": str(prompt_file),
                 "video_id": video_id,
                 "error": "Claude CLI not installed"
@@ -248,7 +249,7 @@ Please search thoroughly and provide the most accurate match possible."""
         except subprocess.TimeoutExpired:
             print(f"  ❌ Claude call timed out after 5 minutes")
             return {
-                "status": "error",
+                "process_status": "error",
                 "prompt_file": str(prompt_file),
                 "video_id": video_id,
                 "error": "Claude request timed out"
@@ -262,7 +263,7 @@ Please search thoroughly and provide the most accurate match possible."""
                 f.write(f"Error: {str(e)}\nType: {type(e).__name__}")
             
             return {
-                "status": "error",
+                "process_status": "error",
                 "prompt_file": str(prompt_file),
                 "error_file": str(error_file),
                 "video_id": video_id,
@@ -292,7 +293,7 @@ Please search thoroughly and provide the most accurate match possible."""
             if video_info['video_id'] in self.excluded_videos:
                 print(f"  ⚠️  EXCLUDED: Video is in exclusion list")
                 results[caption_dir] = {
-                    "status": "excluded",
+                    "process_status": "excluded",
                     "reason": "in_exclusion_list",
                     "video_id": video_info['video_id']
                 }
@@ -305,7 +306,7 @@ Please search thoroughly and provide the most accurate match possible."""
                 if not transcript:
                     print(f"  ⚠️  No transcript found, skipping...")
                     results[caption_dir] = {
-                        "status": "skipped",
+                        "process_status": "skipped",
                         "reason": "no_transcript"
                     }
                     continue
@@ -319,11 +320,12 @@ Please search thoroughly and provide the most accurate match possible."""
                 # Run Claude search
                 result = self.run_claude_search(matching_prompt, video_info['video_id'])
                 results[caption_dir] = result
-                print(f"  ✓ Search task {'completed' if result['status'] == 'completed' else 'failed'}")
+                print(f"  ✓ Search task {'completed' if result['process_status'] == 'completed' else 'failed'}")
 
-                if result['status'] == 'completed':
-                    # Read the JSON file Claude created
-                    match_file_path = self.output_dir / str(year) / video_info['caption_dir'] / "matches.json"
+                if result['process_status'] == 'completed':
+                    # Read the JSON file Claude created (new structure)
+                    video_dir = self.output_dir / str(year) / video_info['caption_dir']
+                    match_file_path = video_dir / ".pipeline" / "source" / "matches.json"
                     
                     if match_file_path.exists():
                         with open(match_file_path) as f:
@@ -336,13 +338,15 @@ Please search thoroughly and provide the most accurate match possible."""
                         confidence = match_data.get('confidence_score', 0)
                         if confidence < 0.8:
                             print(f"  ⚠️  Low confidence match ({confidence})")
-                            results[caption_dir]['status'] = 'low_confidence'
+                            results[caption_dir]['process_status'] = 'low_confidence'
                         else:
                             print(f"  ✓ High confidence match ({confidence})")
                             
-                        # Save match log to video's logs.json
-                        video_dir = self.output_dir / str(year) / video_info['caption_dir']
-                        log_file = video_dir / 'logs.json'
+                        # Save match log to video's logs.json (new structure)
+                        log_file = video_dir / '.pipeline' / 'logs' / 'logs.json'
+                        
+                        # Ensure logs directory exists
+                        log_file.parent.mkdir(parents=True, exist_ok=True)
                         
                         # Load existing logs if file exists
                         if log_file.exists():
@@ -355,7 +359,7 @@ Please search thoroughly and provide the most accurate match possible."""
                         logs['matching'] = {
                             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                             'data': {
-                                'status': result['status'],
+                                'process_status': result['process_status'],
                                 'confidence_score': confidence,
                                 'primary_files': match_data.get('primary_files', []),
                                 'related_files': match_data.get('related_files', [])
@@ -367,7 +371,7 @@ Please search thoroughly and provide the most accurate match possible."""
                             json.dump(logs, f, indent=2)
                     else:
                         print(f"  ❌ Match file not created by Claude at {match_file_path}")
-                        results[caption_dir]['status'] = 'no_match_file'
+                        results[caption_dir]['process_status'] = 'no_match_file'
                 else:
                     print(f"  ❌ Claude search failed for {video_info['video_id']}: {result.get('error', 'Unknown error')}")
                 
@@ -377,7 +381,7 @@ Please search thoroughly and provide the most accurate match possible."""
             except Exception as e:
                 print(f"  ❌ Error: {e}")
                 results[caption_dir] = {
-                    "status": "error",
+                    "process_status": "error",
                     "error": str(e)
                 }
         
@@ -400,11 +404,11 @@ Please search thoroughly and provide the most accurate match possible."""
         summary = {
             "year": year,
             "total_videos": len(results),
-            "successful_matches": sum(1 for r in results.values() if r.get('status') == 'completed' and 'match_data' in r and r['match_data'].get('confidence_score', 0) >= 0.8),
-            "low_confidence_matches": sum(1 for r in results.values() if r.get('status') == 'low_confidence'),
-            "failed_matches": sum(1 for r in results.values() if r.get('status') == 'error'),
-            "skipped_videos": sum(1 for r in results.values() if r.get('status') == 'skipped'),
-            "excluded_videos": sum(1 for r in results.values() if r.get('status') == 'excluded'),
+            "successful_matches": sum(1 for r in results.values() if r.get('process_status') == 'completed' and 'match_data' in r and r['match_data'].get('confidence_score', 0) >= 0.8),
+            "low_confidence_matches": sum(1 for r in results.values() if r.get('process_status') == 'low_confidence'),
+            "failed_matches": sum(1 for r in results.values() if r.get('process_status') == 'error'),
+            "skipped_videos": sum(1 for r in results.values() if r.get('process_status') == 'skipped'),
+            "excluded_videos": sum(1 for r in results.values() if r.get('process_status') == 'excluded'),
             "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
             "results": results
         }

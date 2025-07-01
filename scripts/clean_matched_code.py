@@ -132,18 +132,24 @@ class CodeCleaner:
         
     def should_clean_video(self, match_data: Dict, force: bool = False) -> Tuple[bool, str]:
         """Determine if a video should be cleaned based on match data."""
+        # Handle nested match_data structure (safety check)
+        if 'match_data' in match_data and isinstance(match_data['match_data'], dict):
+            actual_data = match_data['match_data']
+        else:
+            actual_data = match_data
+            
         # Check if status indicates a successful match
-        status = match_data.get('status', '')
+        status = actual_data.get('status', '')
         if status == 'no_transcript':
             return False, "No transcript available"
         
         # Check confidence score
-        confidence = match_data.get('confidence_score', 0)
+        confidence = actual_data.get('confidence_score', 0)
         if confidence < 0.8:
             return False, f"Low confidence score: {confidence}"
             
         # Check if primary files exist
-        primary_files = match_data.get('primary_files', [])
+        primary_files = actual_data.get('primary_files', [])
         if not primary_files:
             return False, "No primary files identified"
             
@@ -184,11 +190,17 @@ class CodeCleaner:
     def create_cleaning_prompt(self, video_id: str, caption_dir: str, 
                              match_data: Dict, year: int) -> str:
         """Create a prompt for Claude to clean and inline code."""
-        primary_files = match_data.get('primary_files', [])
-        supporting_files = match_data.get('supporting_files', [])
+        # Handle nested match_data structure (safety check)
+        if 'match_data' in match_data and isinstance(match_data['match_data'], dict):
+            actual_data = match_data['match_data']
+        else:
+            actual_data = match_data
+            
+        primary_files = actual_data.get('primary_files', [])
+        supporting_files = actual_data.get('supporting_files', [])
         all_files = primary_files + supporting_files
         
-        output_path = self.output_dir / str(year) / caption_dir / 'cleaned_code.py'
+        output_path = self.output_dir / str(year) / caption_dir / 'monolith_manimgl.py'
         
         return f"""You are an expert in cleaning and inlining Manim code for the 3Blue1Brown dataset.
 
@@ -196,7 +208,7 @@ Video Information:
 - YouTube ID: {video_id}
 - Caption Directory: {caption_dir}
 - Year: {year}
-- Confidence Score: {match_data.get('confidence_score', 0)}
+- Confidence Score: {actual_data.get('confidence_score', 0)}
 
 The following files were identified as generating this video:
 Primary files: {json.dumps(primary_files, indent=2)}
@@ -349,7 +361,7 @@ create a file with comments explaining what went wrong."""
                 self.logger.warning(f"{caption_dir}: {error_msg}")
                 
                 # Check if Claude created the file despite timeout
-                expected_output = self.output_dir / str(year) / caption_dir / 'cleaned_code.py'
+                expected_output = self.output_dir / str(year) / caption_dir / 'monolith_manimgl.py'
                 
                 if expected_output.exists():
                     self.logger.info(f"{caption_dir}: File created despite timeout, checking validity...")
@@ -455,7 +467,30 @@ create a file with comments explaining what went wrong."""
         raw_string_pattern = r'(\w+\()""r"'
         code = re.sub(raw_string_pattern, r'\1r"', code)
         
-        # Fix 5: General parenthesis balancing check and fix for common patterns
+        # Fix 7: Fix corrupted for loop assignments
+        # Pattern: variable = for item in iterable:
+        # Should be: variable = ""\nfor item in iterable:
+        # This handles cases where Claude incorrectly merges initialization with loop
+        corrupted_for_pattern = r'^(\s*)(\w+)\s*=\s*for\s+(\w+)\s+in\s+(.+):\s*$'
+        def fix_corrupted_for(match):
+            indent = match.group(1)
+            var = match.group(2)
+            item = match.group(3)
+            iterable = match.group(4)
+            return f'{indent}{var} = ""\n{indent}for {item} in {iterable}:'
+        
+        code = re.sub(corrupted_for_pattern, fix_corrupted_for, code, flags=re.MULTILINE)
+        
+        # Fix 8: Fix function calls with parenthesis on wrong line (astunparse issue)
+        # Pattern: function_name()\n    args...
+        code = re.sub(r'(\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        code = re.sub(r'(\w+\.\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        code = re.sub(r'(\w+\s*=\s*\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        code = re.sub(r'(\w+\s*=\s*\w+\.\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        code = re.sub(r'(self\.\w+\s*=\s*\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        code = re.sub(r'(return\s+\w+)\(\)\s*\n\s+([^)]+)\)', r'\1(\2)', code, flags=re.MULTILINE)
+        
+        # Fix 9: General parenthesis balancing check and fix for common patterns
         lines = code.split('\n')
         fixed_lines = []
         
@@ -489,6 +524,47 @@ create a file with comments explaining what went wrong."""
             fixed_lines.append(line)
         
         code = '\n'.join(fixed_lines)
+        
+        # Fix 9: Quote mismatch in raw strings - fix r" with """ endings
+        def fix_raw_string_quote_mismatch(code):
+            """Fix cases where raw strings start with r" but end with triple quotes."""
+            
+            # Pattern 1: Multiline raw strings with quote mismatch
+            # Match: r" followed by content with newlines, ending with """
+            multiline_pattern = r'r"([^"]*\n[^"]*?)"""'
+            
+            def fix_multiline_raw(match):
+                content = match.group(1)
+                # Convert to proper triple-quoted raw string
+                return f'r"""{content}"""'
+            
+            # Apply multiline fix
+            code = re.sub(multiline_pattern, fix_multiline_raw, code, flags=re.MULTILINE | re.DOTALL)
+            
+            # Pattern 2: Single-line cases with quote mismatch  
+            # Match: r" followed by content (no newlines), ending with """
+            singleline_pattern = r'r"([^"\n]*?)"""'
+            
+            def fix_singleline_raw(match):
+                content = match.group(1)
+                # For single-line, just use single quotes
+                return f'r"{content}"'
+            
+            # Apply single-line fix
+            code = re.sub(singleline_pattern, fix_singleline_raw, code)
+            
+            # Pattern 3: Handle reverse case - r''' with " ending
+            reverse_multiline_pattern = r"r'''([^']*\n[^']*?)\"(?=\"\")"
+            reverse_singleline_pattern = r"r'([^'\n]*?)\"(?=\"\")"
+            
+            # Fix reverse cases (less common but possible)
+            code = re.sub(reverse_multiline_pattern, r"r'''\1'''", code, flags=re.MULTILINE | re.DOTALL)
+            code = re.sub(reverse_singleline_pattern, r"r'\1'", code)
+            
+            return code
+        
+        # Apply the quote mismatch fix
+        code = fix_raw_string_quote_mismatch(code)
         
         return code
     
@@ -598,6 +674,64 @@ create a file with comments explaining what went wrong."""
         # Save updated logs
         with open(log_file, 'w') as f:
             json.dump(logs, f, indent=2)
+    
+    def clean_single_video(self, video_id: str, caption_dir: str, match_data: Dict, year: int) -> Dict:
+        """Clean a single video using monolithic approach."""
+        # Check if we should clean this video
+        should_clean, reason = self.should_clean_video(match_data, force=True)
+        
+        if not should_clean:
+            return {
+                'status': 'skipped',
+                'reason': reason
+            }
+        
+        # Estimate file sizes
+        all_files = match_data.get('primary_files', []) + match_data.get('supporting_files', [])
+        total_size = self.estimate_total_file_size(all_files, year)
+        
+        # Check if files are too large
+        MAX_FILE_SIZE = 800_000  # 800KB
+        if total_size > MAX_FILE_SIZE:
+            return {
+                'status': 'failed',
+                'reason': f'Files too large: {total_size:,} bytes exceeds {MAX_FILE_SIZE:,} byte limit'
+            }
+        
+        # Create cleaning prompt
+        prompt = self.create_cleaning_prompt(video_id, caption_dir, match_data, year)
+        
+        # Run cleaning
+        max_retries = getattr(self, 'max_retries', 3)
+        result = self.run_claude_cleaning(prompt, video_id, caption_dir, year=year, file_size=total_size, max_retries=max_retries)
+        
+        if result['status'] == 'completed':
+            # Validate the cleaned code
+            cleaned_file = self.output_dir / str(year) / caption_dir / 'monolith_manimgl.py'
+            is_valid, error = self.validate_cleaned_code(cleaned_file)
+            
+            if is_valid:
+                result['validation'] = 'passed'
+            else:
+                # Try to fix the code
+                try:
+                    with open(cleaned_file) as f:
+                        broken_code = f.read()
+                    
+                    # Apply fixes
+                    fixed_code = self.fix_common_syntax_issues(broken_code)
+                    compile(fixed_code, str(cleaned_file), 'exec')
+                    
+                    # If we get here, the fixes worked
+                    with open(cleaned_file, 'w') as f:
+                        f.write(fixed_code)
+                    
+                    result['validation'] = 'fixed'
+                except Exception:
+                    result['validation'] = 'failed'
+                    result['validation_error'] = error
+        
+        return result
     
     def clean_all_matched_videos(self, year: int = 2015, video_filter: Optional[List[str]] = None, 
                                resume: bool = True, force: bool = False, mode: str = 'scene') -> Dict:
@@ -771,7 +905,7 @@ create a file with comments explaining what went wrong."""
             
             if result['status'] == 'completed':
                 # Validate the cleaned code
-                cleaned_file = self.output_dir / str(year) / caption_dir / 'cleaned_code.py'
+                cleaned_file = self.output_dir / str(year) / caption_dir / 'monolith_manimgl.py'
                 is_valid, error = self.validate_cleaned_code(cleaned_file)
                 
                 if is_valid:

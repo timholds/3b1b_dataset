@@ -20,23 +20,25 @@ from scene_dependency_analyzer import (
     AdvancedDependencyAnalyzer, 
     DependencyInfo,
     extract_code_for_dependencies,
-    find_node_end_line
+    find_node_end_line,
+    convert_parameterized_construct
 )
-# Import scene relationship analyzer
-from scene_relationship_analyzer import SceneRelationshipAnalyzer
+# Scene relationship analyzer removed - not needed for self-contained scenes
 
 
 class SceneInfo:
     """Container for scene information."""
     def __init__(self, name: str, code: str, start_line: int, end_line: int,
                  dependency_info: Optional[DependencyInfo] = None,
-                 dependency_code: Optional[Dict[str, List[str]]] = None):
+                 dependency_code: Optional[Dict[str, List[str]]] = None,
+                 is_parameterized: bool = False):
         self.name = name
         self.code = code
         self.start_line = start_line
         self.end_line = end_line
         self.dependency_info = dependency_info or DependencyInfo()
         self.dependency_code = dependency_code or {}
+        self.is_parameterized = is_parameterized
 
 
 class SceneAwareCleaner(CodeCleaner):
@@ -57,6 +59,10 @@ class SceneAwareCleaner(CodeCleaner):
     def extract_scenes_from_files(self, files: List[Union[str, Dict]], year: int) -> List[SceneInfo]:
         """Extract all Scene classes from a list of files."""
         scenes = []
+        
+        # First, load all files to build cross-file symbol tables
+        file_asts = {}
+        file_contents = {}
         
         for file_info in files:
             # Handle both string file names and dictionary file info
@@ -84,17 +90,25 @@ class SceneAwareCleaner(CodeCleaner):
                 with open(file_path, 'r') as f:
                     content = f.read()
                 
-                # Parse AST to find scenes
+                # Parse AST
                 tree = ast.parse(content)
-                file_scenes = self._extract_scenes_from_ast(tree, content, file_name)
-                scenes.extend(file_scenes)
+                file_asts[str(file_path)] = tree
+                file_contents[str(file_path)] = content.splitlines()
                 
             except Exception as e:
-                self.logger.error(f"Error extracting scenes from {file_name}: {e}")
+                self.logger.error(f"Error parsing {file_name}: {e}")
+        
+        # Now extract scenes with cross-file context
+        for file_path, tree in file_asts.items():
+            content = '\n'.join(file_contents[file_path])
+            file_scenes = self._extract_scenes_from_ast(tree, content, file_path, file_asts, file_contents)
+            scenes.extend(file_scenes)
                 
         return scenes
     
-    def _extract_scenes_from_ast(self, tree: ast.AST, content: str, file_name: str) -> List[SceneInfo]:
+    def _extract_scenes_from_ast(self, tree: ast.AST, content: str, file_name: str,
+                                file_asts: Dict[str, ast.Module] = None,
+                                file_contents: Dict[str, List[str]] = None) -> List[SceneInfo]:
         """Extract Scene classes from AST with proper dependency analysis."""
         scenes = []
         lines = content.split('\n')
@@ -109,12 +123,20 @@ class SceneAwareCleaner(CodeCleaner):
                     
                     class_code = '\n'.join(lines[start_line:end_line])
                     
-                    # Use advanced dependency analyzer
-                    analyzer = AdvancedDependencyAnalyzer(node, tree)
+                    # Check if this is a parameterized scene and convert if needed
+                    converted_code = convert_parameterized_construct(node, lines)
+                    is_parameterized = converted_code is not None
+                    if is_parameterized:
+                        class_code = converted_code
+                        self.logger.info(f"    ↳ Converted parameterized construct for {node.name}")
+                    
+                    # Use advanced dependency analyzer with cross-file support
+                    analyzer = AdvancedDependencyAnalyzer(node, tree, file_asts, file_contents)
                     dependency_info = analyzer.analyze()
                     
-                    # Extract the actual code for dependencies
-                    dependency_code = extract_code_for_dependencies(tree, lines, dependency_info)
+                    # Extract the actual code for dependencies with cross-file support
+                    dependency_code = extract_code_for_dependencies(tree, lines, dependency_info, 
+                                                                   file_asts, file_contents)
                     
                     scene = SceneInfo(
                         name=node.name,
@@ -122,7 +144,8 @@ class SceneAwareCleaner(CodeCleaner):
                         start_line=start_line,
                         end_line=end_line,
                         dependency_info=dependency_info,
-                        dependency_code=dependency_code
+                        dependency_code=dependency_code,
+                        is_parameterized=is_parameterized
                     )
                     
                     scenes.append(scene)
@@ -216,10 +239,16 @@ CRITICAL INSTRUCTIONS:
 - Ensure the output is syntactically valid Python
 - If you see 'from manimlib import *' or 'from manim_imports_ext import *', keep it exactly as is
 - Place helper functions and constants BEFORE the scene class
+- IMPORTANT: Make sure ALL dependencies are included. The scene must be self-contained!
+- If a function/class is used but not defined in the extracted dependencies, you MUST find and include it
+- Common missing items: Face, SpeechBubble, Underbrace, helper functions like zero_to_one_interval()
 
 IMPORTANT: Do NOT create any additional files. Only save the cleaned scene to the specified path.
 Do not create separate dependency files or any other auxiliary files.
 If dependencies are missing, include them directly in the cleaned scene file.
+
+The scene is parameterized: {"True" if scene.is_parameterized else "False"}
+{"Note: The parameterized construct has already been converted to use __init__ with instance attributes." if scene.is_parameterized else ""}
 
 Save the cleaned scene to: {output_path}
 
@@ -292,6 +321,59 @@ Include this header:
         
         return cleaning_results
     
+    def clean_scenes_individually_simple(self, scenes: List[SceneInfo], match_data: Dict,
+                                        video_id: str, caption_dir: str, year: int) -> Dict:
+        """Clean scenes individually without relationship analysis - simpler approach."""
+        all_files = match_data.get('primary_files', []) + match_data.get('supporting_files', [])
+        
+        # Create output directory for cleaned scenes
+        scenes_output_dir = self.output_dir / str(year) / caption_dir / 'cleaned_scenes'
+        scenes_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        cleaning_results = {
+            'scenes': {},
+            'total_scenes': len(scenes),
+            'cleaned_scenes': 0,
+            'failed_scenes': 0
+        }
+        
+        for i, scene in enumerate(scenes):
+            progress = self._make_progress_bar(i, len(scenes))
+            
+            if self.verbose:
+                print(f"\r{progress} Cleaning scene {i+1}/{len(scenes)}: {scene.name}", end='', flush=True)
+            
+            # Create simple cleaning prompt without relationship context
+            prompt = self.create_simple_cleaning_prompt(scene, all_files, video_id, caption_dir, year)
+            
+            # Clean the scene
+            result = self.run_claude_cleaning(
+                prompt, f"{video_id}_{scene.name}", caption_dir, year, 
+                file_size=len(scene.code), task_type='simple_scene_cleaning'
+            )
+            
+            # Save individual scene
+            if result and result.get('status') == 'completed':
+                scene_file = scenes_output_dir / f'{scene.name}.py'
+                try:
+                    with open(scene_file, 'w') as f:
+                        f.write(result['content'])
+                    cleaning_results['cleaned_scenes'] += 1
+                    result['scene_file'] = str(scene_file)
+                except Exception as e:
+                    self.logger.error(f"Error saving scene {scene.name}: {e}")
+                    result = {'status': 'failed', 'reason': f'Save error: {e}'}
+                    cleaning_results['failed_scenes'] += 1
+            else:
+                cleaning_results['failed_scenes'] += 1
+                
+            cleaning_results['scenes'][scene.name] = result
+            
+            # Small delay between API calls
+            time.sleep(2)
+        
+        return cleaning_results
+
     def clean_scenes_individually_with_context(self, scenes: List[SceneInfo], match_data: Dict,
                                              video_id: str, caption_dir: str, year: int,
                                              relationship_analysis: Dict) -> Dict:
@@ -491,14 +573,69 @@ Include this header:
 ```python
 # Scene: {scene.name}
 # From Video: {video_id}
-# Scene Role: {scene_role}
+# Cleaned on: {datetime.now().isoformat()}
+# Original lines: {scene.start_line+1}-{scene.end_line}
+```"""
+
+    def create_simple_cleaning_prompt(self, scene: SceneInfo, all_files: List[str],
+                                    video_id: str, caption_dir: str, year: int) -> str:
+        """Create a simple cleaning prompt without relationship analysis."""
+        output_path = self.output_dir / str(year) / caption_dir / 'cleaned_scenes' / f'{scene.name}.py'
+        
+        # Build dependency code section
+        dependency_code_section = ""
+        
+        if scene.dependency_code.get('constants'):
+            dependency_code_section += "\n# Required Constants:\n"
+            dependency_code_section += '\n'.join(scene.dependency_code['constants'])
+            dependency_code_section += "\n"
+        
+        if scene.dependency_code.get('functions'):
+            dependency_code_section += "\n# Required Functions:\n"
+            dependency_code_section += '\n\n'.join(scene.dependency_code['functions'])
+            dependency_code_section += "\n"
+            
+        if scene.dependency_code.get('classes'):
+            dependency_code_section += "\n# Required Classes:\n"
+            dependency_code_section += '\n\n'.join(scene.dependency_code['classes'])
+            dependency_code_section += "\n"
+        
+        return f"""I need you to clean and inline a single 3Blue1Brown scene to make it self-contained.
+
+SCENE TO CLEAN:
+```python
+{scene.code}
+```
+
+DEPENDENCIES TO INLINE:
+{dependency_code_section}
+
+INSTRUCTIONS:
+1. Inline all dependencies directly into the scene
+2. Remove all local imports (keep only standard library and manim imports)
+3. Ensure the scene is completely self-contained and can run independently
+4. Keep all functionality intact
+5. Clean up any commented-out code or debugging statements
+6. Handle parameterized construct() methods by converting to use __init__ with instance attributes
+
+IMPORTANT:
+- Don't change the core scene logic or functionality
+- Don't add functionality that wasn't there originally
+- The result should be valid Python that would run in ManimGL
+- Include all necessary imports at the top
+
+Please provide the cleaned, self-contained scene code.
+
+Include this header:
+```python
+# Scene: {scene.name}
+# From Video: {video_id}
 # Cleaned on: {datetime.now().isoformat()}
 # Original lines: {scene.start_line+1}-{scene.end_line}
 ```"""
     
-    def combine_cleaned_scenes_with_context(self, scenes_dir: Path, output_file: Path,
-                                          relationship_analysis: Dict) -> bool:
-        """Combine cleaned scenes intelligently using relationship analysis."""
+    def combine_cleaned_scenes_simple(self, scenes_dir: Path, output_file: Path) -> bool:
+        """Combine cleaned scenes in simple file order - no flow analysis needed."""
         if not scenes_dir.exists():
             self.logger.error(f"Scenes directory not found: {scenes_dir}")
             return False
@@ -508,29 +645,11 @@ Include this header:
             self.logger.error(f"No scene files found in {scenes_dir}")
             return False
         
-        # Order scenes according to the optimal order from relationship analysis
-        scene_order = relationship_analysis['scene_order']
-        ordered_files = []
-        
-        # Create a map of scene names to files
-        file_map = {f.stem: f for f in scene_files}
-        
-        # Order files according to scene_order
-        for scene_name in scene_order:
-            if scene_name in file_map:
-                ordered_files.append(file_map[scene_name])
-        
-        # Add any files not in the order (shouldn't happen, but just in case)
-        for f in scene_files:
-            if f not in ordered_files:
-                ordered_files.append(f)
-        
         combined_content = []
         imports_section = set()
-        shared_utilities = set()
         
-        # First pass: collect all imports and shared utilities
-        for scene_file in ordered_files:
+        # First pass: collect all imports
+        for scene_file in scene_files:
             with open(scene_file, 'r') as f:
                 content = f.read()
                 lines = content.split('\n')
@@ -539,11 +658,10 @@ Include this header:
                     if line.strip().startswith(('import ', 'from ')):
                         imports_section.add(line.strip())
         
-        # Build combined file
-        combined_content.append("# Combined cleaned scenes with preserved relationships")
+        # Build combined file header
+        combined_content.append("# Combined cleaned scenes for self-contained snippets")
         combined_content.append(f"# Generated on: {datetime.now().isoformat()}")
-        combined_content.append(f"# Total scenes: {len(ordered_files)}")
-        combined_content.append(f"# Processing order preserves mathematical flow")
+        combined_content.append(f"# Total scenes: {len(scene_files)}")
         combined_content.append("")
         
         # Add grouped imports
@@ -560,55 +678,24 @@ Include this header:
         combined_content.append("")
         combined_content.append("")
         
-        # Extract and add shared utilities first
-        flow = relationship_analysis['flow_analysis']
-        shared_objects = relationship_analysis['shared_objects']
-        
-        if shared_objects:
-            combined_content.append("# ========== Shared Utilities and Objects ==========")
-            combined_content.append(f"# These are used across multiple scenes")
-            combined_content.append("")
-        
-        # Add scenes in optimal order with section headers
-        sections = [
-            ("Introduction Scenes", flow['introduction_scenes']),
-            ("Development Scenes", flow['development_scenes']),
-            ("Conclusion Scenes", flow['conclusion_scenes']),
-            ("Independent Scenes", flow['independent_scenes'])
-        ]
-        
-        for section_name, section_scenes in sections:
-            if not section_scenes:
-                continue
-                
-            combined_content.append(f"\n# {'='*20} {section_name} {'='*20}")
+        # Add all scenes in alphabetical order
+        for scene_file in scene_files:
+            combined_content.append(f"\n# ========== Scene: {scene_file.stem} ==========")
             
-            for scene_file in ordered_files:
-                if scene_file.stem not in section_scenes:
-                    continue
+            with open(scene_file, 'r') as f:
+                content = f.read()
+                lines = content.split('\n')
+                
+                # Skip imports and headers, add the rest
+                in_header = True
+                for line in lines:
+                    if in_header and line.strip() and not line.startswith('#'):
+                        in_header = False
                     
-                combined_content.append(f"\n# ========== Scene: {scene_file.stem} ==========")
-                
-                # Add relationship info as comment
-                scene_deps = [r for r in relationship_analysis['relationships'] 
-                            if r.from_scene == scene_file.stem]
-                if scene_deps:
-                    combined_content.append(f"# Relationships: {', '.join(f'{d.relationship_type} {d.to_scene}' for d in scene_deps)}")
-                
-                with open(scene_file, 'r') as f:
-                    content = f.read()
-                    lines = content.split('\n')
-                    
-                    # Skip imports and headers, add the rest
-                    in_header = True
-                    for line in lines:
-                        if in_header and line.strip() and not line.startswith('#'):
-                            in_header = False
-                        
-                        if not in_header and not line.strip().startswith(('import ', 'from ')):
-                            combined_content.append(line)
-                
-                combined_content.append("")
+                    if not in_header and not line.strip().startswith(('import ', 'from ')):
+                        combined_content.append(line)
+            
+            combined_content.append("")
         
         # Write combined file
         try:
@@ -618,7 +705,7 @@ Include this header:
             # Validate the combined file
             is_valid, error = self.validate_cleaned_code(output_file)
             if is_valid:
-                self.logger.info(f"✓ Combined {len(scene_files)} scenes into single file with preserved relationships")
+                self.logger.info(f"✓ Combined {len(scene_files)} scenes into single file")
                 return True
             else:
                 self.logger.error(f"Combined file has syntax errors: {error}")
@@ -909,32 +996,20 @@ Save the recovered scene to: {output_path}"""
         if self.verbose:
             print(f"\nExtracted {len(scenes)} scenes from {len(all_files)} files:")
         
-        # Analyze scene relationships before cleaning
-        self.logger.info(f"Analyzing scene relationships...")
-        relationship_analyzer = SceneRelationshipAnalyzer(scenes)
-        relationship_analysis = relationship_analyzer.analyze_all_relationships()
+        # Skip relationship analysis - process scenes in file order for self-contained snippets
+        self.logger.info(f"Processing scenes individually for self-contained snippets...")
         
-        # Summary of relationships
-        n_rels = len(relationship_analysis['relationships'])
-        n_shared = len(relationship_analysis['shared_objects'])
-        flow = relationship_analysis['flow_analysis']
-        flow_str = f"{len(flow['introduction_scenes'])}i/{len(flow['development_scenes'])}d/{len(flow['conclusion_scenes'])}c/{len(flow['independent_scenes'])}x"
-        self.logger.info(f"  Relationships: {n_rels}, Shared objects: {n_shared}, Flow: {flow_str}")
-        
-        # Store relationship analysis for use during cleaning
-        self.current_relationship_analysis = relationship_analysis
-        
-        # Clean each scene individually with relationship context
-        cleaning_results = self.clean_scenes_individually_with_context(
-            scenes, match_data, video_id, caption_dir, year, relationship_analysis
+        # Clean each scene individually without relationship context
+        cleaning_results = self.clean_scenes_individually_simple(
+            scenes, match_data, video_id, caption_dir, year
         )
         
         # Combine cleaned scenes into single file using smart merging
         scenes_dir = self.output_dir / str(year) / caption_dir / 'cleaned_scenes'
-        output_file = self.output_dir / str(year) / caption_dir / 'cleaned_code.py'
+        output_file = self.output_dir / str(year) / caption_dir / 'monolith_manimgl.py'
         
-        combine_success = self.combine_cleaned_scenes_with_context(
-            scenes_dir, output_file, relationship_analysis
+        combine_success = self.combine_cleaned_scenes_simple(
+            scenes_dir, output_file
         )
         
         cleaning_results['combine_success'] = combine_success
@@ -952,7 +1027,7 @@ Save the recovered scene to: {output_path}"""
             if cleaning_results['failed_scenes'] > 0:
                 print(f"  ⚠️  {cleaning_results['failed_scenes']} scenes failed")
             if combine_success:
-                print(f"  ✅ Combined into cleaned_code.py")
+                print(f"  ✅ Combined into monolith_manimgl.py")
             else:
                 print(f"  ❌ Combination failed")
         

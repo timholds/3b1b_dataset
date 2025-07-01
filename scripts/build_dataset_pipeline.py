@@ -9,19 +9,33 @@ This script coordinates the entire pipeline:
 5. Compare with YouTube videos (future)
 """
 
+
+# Automatically enable enhanced prompts for better performance
+try:
+    import auto_enable_enhanced_prompts
+except ImportError:
+    # Enhanced prompts not available, continue with standard prompts
+    pass
+
 import json
 import logging
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import subprocess
 import sys
+import warnings
+from io import StringIO
+import contextlib
 
 # Import the components
 sys.path.append(str(Path(__file__).parent))
 from claude_match_videos import ClaudeVideoMatcher
-from clean_matched_code import CodeCleaner
+# Import hybrid cleaner (programmatic + Claude fallback)
+from hybrid_cleaner import HybridCleaner
+# Import parameterized scene converter for automatic conversion
+from parameterized_scene_converter import ParameterizedSceneConverter
 # ManimConverter removed - using integrated converter only
 from render_videos import VideoRenderer
 from manimce_precompile_validator import ManimCEPrecompileValidator
@@ -29,13 +43,35 @@ from conversion_error_collector import collect_conversion_error, get_error_colle
 from generate_comparison_report import ComparisonReportGenerator
 from scene_validator import SceneValidator
 
+@contextlib.contextmanager
+def capture_syntax_warnings():
+    """Context manager to capture syntax warnings and return them."""
+    captured_warnings = []
+    
+    def custom_warn(message, category=UserWarning, filename='', lineno=-1, file=None, line=None):
+        if category == SyntaxWarning:
+            captured_warnings.append(str(message))
+        else:
+            # Let other warnings through normally
+            original_warn(message, category, filename, lineno, file, line)
+    
+    original_warn = warnings.showwarning
+    warnings.showwarning = custom_warn
+    
+    try:
+        yield captured_warnings
+    finally:
+        warnings.showwarning = original_warn
+
 class DatasetPipelineBuilder:
     def __init__(self, base_dir: str, verbose: bool = False, timeout_multiplier: float = 1.0, 
                  max_retries: int = 3, enable_render_validation: bool = True, 
                  render_max_attempts: int = 3, use_advanced_converter: bool = True,
                  enable_precompile_validation: bool = True, auto_fix_precompile: bool = True,
-                 cleaning_mode: str = 'scene', conversion_mode: str = 'scene',
-                 parallel_render_workers: int = 1):
+                 cleaning_mode: str = 'hybrid', conversion_mode: str = 'scene',
+                 parallel_render_workers: int = 1, use_systematic_converter: bool = True,
+                 enable_unfixable_skipping: bool = True, monitor_unfixable_only: bool = False,
+                 min_conversion_confidence: float = 0.8):
         self.base_dir = Path(base_dir)
         self.output_dir = self.base_dir / 'outputs'
         self.verbose = verbose
@@ -48,13 +84,18 @@ class DatasetPipelineBuilder:
         self.auto_fix_precompile = auto_fix_precompile
         self.cleaning_mode = cleaning_mode
         self.conversion_mode = conversion_mode
+        self.use_systematic_converter = use_systematic_converter
+        self.enable_unfixable_skipping = enable_unfixable_skipping
+        self.monitor_unfixable_only = monitor_unfixable_only
+        self.min_conversion_confidence = min_conversion_confidence
         
         # Intelligent hybrid parsing strategy
         self.intelligent_parsing = True  # Always use smart hybrid approach
         
         # Initialize components
         self.matcher = ClaudeVideoMatcher(base_dir, verbose)
-        self.cleaner = CodeCleaner(base_dir, verbose, timeout_multiplier=timeout_multiplier, max_retries=max_retries)
+        self.cleaner = HybridCleaner(base_dir, verbose, timeout_multiplier=timeout_multiplier, max_retries=max_retries)
+        self.param_converter = ParameterizedSceneConverter(verbose=verbose)
         self.renderer = VideoRenderer(base_dir, verbose, parallel_render_workers)
         self.validator = ManimCEPrecompileValidator(verbose=verbose)
         self.scene_validator = SceneValidator(verbose=verbose)
@@ -113,6 +154,9 @@ class DatasetPipelineBuilder:
             }
         }
         
+        # Collect syntax warnings for cleaner output
+        self.collected_warnings = []
+        
     def _ensure_log_file(self):
         """Create log file handler only when we actually need to log something."""
         if not self.log_file_created:
@@ -131,14 +175,26 @@ class DatasetPipelineBuilder:
     
     def save_video_log(self, video_dir: Path, stage: str, log_data: Dict):
         """Save stage-specific log data to the video's logs.json file."""
-        log_file = video_dir / 'logs.json'
+        log_file = video_dir / '.pipeline' / 'logs' / 'logs.json'
+        
+        # Ensure directory exists
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Load existing logs if file exists
+        logs = {}
         if log_file.exists():
-            with open(log_file) as f:
-                logs = json.load(f)
-        else:
-            logs = {}
+            try:
+                with open(log_file, 'r') as f:
+                    content = f.read()
+                    if content.strip():  # Only parse if file is not empty
+                        logs = json.loads(content)
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Corrupted logs.json for {video_dir.name}, creating new one: {e}")
+                # Backup corrupted file
+                backup_file = log_file.with_suffix('.json.corrupted')
+                if log_file.exists():
+                    log_file.rename(backup_file)
+                logs = {}
         
         # Add or update the stage log
         logs[stage] = {
@@ -146,9 +202,18 @@ class DatasetPipelineBuilder:
             'data': log_data
         }
         
-        # Save updated logs
-        with open(log_file, 'w') as f:
-            json.dump(logs, f, indent=2)
+        # Save updated logs with atomic write
+        temp_file = log_file.with_suffix('.json.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(logs, f, indent=2)
+            # Atomic rename
+            temp_file.replace(log_file)
+        except Exception as e:
+            self.logger.error(f"Failed to save logs for {video_dir.name}: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
     
     def load_excluded_videos(self) -> List[str]:
         """Load list of videos to exclude from processing."""
@@ -207,6 +272,131 @@ class DatasetPipelineBuilder:
             return False, "No primary files found"
             
         return True, "Ready for processing"
+    
+    def preprocess_parameterized_scenes(self, year: int, video_filter: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Preprocess files to automatically convert parameterized scenes before cleaning."""
+        self.logger.info("Preprocessing parameterized scenes...")
+        
+        preprocessing_stats = {
+            'total_files_checked': 0,
+            'parameterized_files_found': 0,
+            'files_converted': 0,
+            'conversion_failures': 0,
+            'total_parameters_converted': 0,
+            'converted_classes': []
+        }
+        
+        year_dir = self.output_dir / str(year)
+        if not year_dir.exists():
+            self.logger.warning(f"No output directory found for year {year}")
+            return preprocessing_stats
+        
+        for video_dir in year_dir.iterdir():
+            if not video_dir.is_dir():
+                continue
+                
+            # Apply video filter if specified
+            if video_filter and video_dir.name not in video_filter:
+                continue
+            
+            # Look for matched files to preprocess
+            matches_file = video_dir / '.pipeline' / 'source' / 'matches.json'
+            if not matches_file.exists():
+                continue
+                
+            try:
+                with open(matches_file) as f:
+                    match_data = json.load(f)
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Corrupted matches.json for {video_dir.name}, skipping: {e}")
+                continue
+                    
+            primary_files = match_data.get('primary_files', [])
+            try:
+                for file_path_str in primary_files:
+                    # Handle both string format and dict format for primary_files
+                    if isinstance(file_path_str, dict):
+                        file_path = Path(file_path_str['file_path'])
+                    else:
+                        # Convert relative path to absolute path from base_dir
+                        file_path = self.base_dir / file_path_str
+                    
+                    if not file_path.exists():
+                        continue
+                        
+                    preprocessing_stats['total_files_checked'] += 1
+                        
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        
+                        # Check if file has parameterized scenes
+                        if self.param_converter.is_parameterized_scene(content):
+                            preprocessing_stats['parameterized_files_found'] += 1
+                            
+                            self.logger.info(f"Converting parameterized scenes in {file_path}")
+                            
+                            # Convert the file
+                            converted_content, success, conversion_info = self.param_converter.convert_file_content(
+                                content, str(file_path)
+                            )
+                            
+                            if success:
+                                # Validate the conversion
+                                validation = self.param_converter.validate_conversion(content, converted_content)
+                                
+                                if validation['syntax_valid'] and not validation['issues']:
+                                    # Save the converted file
+                                    backup_path = file_path.with_suffix(f'{file_path.suffix}.original')
+                                    if not backup_path.exists():
+                                        # Create backup of original
+                                        with open(backup_path, 'w', encoding='utf-8') as f:
+                                            f.write(content)
+                                    
+                                    # Write converted content
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        f.write(converted_content)
+                                    
+                                    preprocessing_stats['files_converted'] += 1
+                                    preprocessing_stats['total_parameters_converted'] += conversion_info.get('total_parameters', 0)
+                                    preprocessing_stats['converted_classes'].extend(conversion_info.get('converted_classes', []))
+                                    
+                                    # Log the conversion details
+                                    self.save_video_log(video_dir, 'parameterized_conversion', {
+                                        'file_path': str(file_path),
+                                        'converted_classes': conversion_info.get('converted_classes', []),
+                                        'total_parameters': conversion_info.get('total_parameters', 0),
+                                        'validation': validation
+                                    })
+                                    
+                                    self.logger.info(f"Successfully converted {len(conversion_info.get('converted_classes', []))} classes")
+                                else:
+                                    self.logger.warning(f"Conversion validation failed for {file_path}: {validation['issues']}")
+                                    preprocessing_stats['conversion_failures'] += 1
+                            else:
+                                self.logger.warning(f"Failed to convert parameterized scenes in {file_path}: {conversion_info}")
+                                preprocessing_stats['conversion_failures'] += 1
+                                
+                    except Exception as e:
+                        self.logger.error(f"Error processing {file_path}: {e}")
+                        preprocessing_stats['conversion_failures'] += 1
+            
+            # This except should be at the video level, not inside the file loop
+            except Exception as e:
+                self.logger.error(f"Error processing video {video_dir.name}: {e}")
+                continue
+        # Log summary statistics
+        self.logger.info(f"Parameterized scene preprocessing complete:")
+        self.logger.info(f"  Files checked: {preprocessing_stats['total_files_checked']}")
+        self.logger.info(f"  Parameterized files found: {preprocessing_stats['parameterized_files_found']}")
+        self.logger.info(f"  Files successfully converted: {preprocessing_stats['files_converted']}")
+        self.logger.info(f"  Conversion failures: {preprocessing_stats['conversion_failures']}")
+        self.logger.info(f"  Total parameters converted: {preprocessing_stats['total_parameters_converted']}")
+        
+        if preprocessing_stats['converted_classes']:
+            self.logger.info(f"  Converted classes: {', '.join(set(preprocessing_stats['converted_classes']))}")
+        
+        return preprocessing_stats
         
     def ensure_video_mappings(self, year: int) -> bool:
         """Ensure video mappings exist for the given year, creating them if needed."""
@@ -242,9 +432,11 @@ class DatasetPipelineBuilder:
 
     def run_matching_stage(self, year: int, force: bool = False, video_filter: Optional[List[str]] = None) -> Dict:
         """Run the video matching stage."""
-        self.logger.info("=" * 60)
-        self.logger.info("STAGE 1: Video Matching")
-        self.logger.info("=" * 60)
+        if not self.verbose:
+            print("[MATCH] Processing videos...", end='', flush=True)
+        else:
+            print("\n📊 Stage 1: Video Matching")
+        self.logger.info("Starting video matching stage")
         
         self.pipeline_state['stages']['matching']['status'] = 'running'
         self.pipeline_state['stages']['matching']['start_time'] = datetime.now().isoformat()
@@ -253,13 +445,17 @@ class DatasetPipelineBuilder:
         summary_file = self.output_dir / f'matching_summary_{year}.json'
         if summary_file.exists() and not force:
             self.logger.info(f"Found existing matching results at {summary_file}")
-            with open(summary_file) as f:
-                existing_summary = json.load(f)
-                
-            self.logger.info("Using existing matching results. Use --force-match to re-run.")
-            self.pipeline_state['stages']['matching']['status'] = 'skipped'
-            self.pipeline_state['stages']['matching']['stats'] = existing_summary.get('stats', {})
-            return existing_summary.get('results', {})
+            try:
+                with open(summary_file) as f:
+                    existing_summary = json.load(f)
+                    
+                self.logger.info("Using existing matching results. Use --force-match to re-run.")
+                self.pipeline_state['stages']['matching']['status'] = 'skipped'
+                self.pipeline_state['stages']['matching']['stats'] = existing_summary.get('stats', {})
+                return existing_summary.get('results', {})
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Corrupted summary file {summary_file}, will re-run matching: {e}")
+                # Continue with matching process
         
         # Ensure video mappings exist
         if not self.ensure_video_mappings(year):
@@ -284,6 +480,10 @@ class DatasetPipelineBuilder:
             'skipped_videos': summary['skipped_videos']
         }
         
+        # Print completion message
+        if not self.verbose:
+            print(f" ✓ ({summary['successful_matches']}/{summary['total_videos']} matched)")
+        
         return results
         
     def validate_cleaned_files(self, year: int) -> Dict[str, bool]:
@@ -296,7 +496,7 @@ class DatasetPipelineBuilder:
             
         for video_dir in year_dir.iterdir():
             if video_dir.is_dir():
-                cleaned_file = video_dir / 'cleaned_code.py'
+                cleaned_file = video_dir / '.pipeline' / 'intermediate' / 'monolith_manimgl.py'
                 if cleaned_file.exists():
                     try:
                         with open(cleaned_file, 'r') as f:
@@ -338,7 +538,7 @@ class DatasetPipelineBuilder:
             scenes_dir = video_dir / 'cleaned_scenes'
             if not scenes_dir.exists():
                 # Check if monolithic cleaned file exists
-                cleaned_file = video_dir / 'cleaned_code.py'
+                cleaned_file = video_dir / '.pipeline' / 'intermediate' / 'monolith_manimgl.py'
                 if cleaned_file.exists():
                     # Validate monolithic file
                     result = self.scene_validator.validate_scene_file(cleaned_file)
@@ -396,8 +596,16 @@ class DatasetPipelineBuilder:
         
         # Save overall validation summary
         summary_file = self.logs_dir / f'scene_validation_summary_{year}.json'
-        with open(summary_file, 'w') as f:
-            json.dump(validation_summary, f, indent=2)
+        temp_file = summary_file.with_suffix('.json.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(validation_summary, f, indent=2)
+            temp_file.replace(summary_file)
+        except Exception as e:
+            self.logger.error(f"Failed to save validation summary: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
             
         self.logger.info(f"Scene validation complete: {validation_summary['validated_videos']}/{validation_summary['total_videos']} videos passed")
         
@@ -611,9 +819,11 @@ Performance Metrics:
     
     def run_cleaning_stage(self, year: int, force: bool = False, video_filter: Optional[List[str]] = None) -> Dict:
         """Run the code cleaning stage."""
-        self.logger.info("=" * 60)
-        self.logger.info("STAGE 2: Code Cleaning")
-        self.logger.info("=" * 60)
+        if not self.verbose:
+            print("[CLEAN] Cleaning code...", end='', flush=True)
+        else:
+            print("\n📊 Stage 2: Code Cleaning")
+        self.logger.info("Starting code cleaning stage")
         
         self.pipeline_state['stages']['cleaning']['status'] = 'running'
         self.pipeline_state['stages']['cleaning']['start_time'] = datetime.now().isoformat()
@@ -622,27 +832,67 @@ Performance Metrics:
         summary_file = self.output_dir / f'cleaning_summary_{year}.json'
         if summary_file.exists() and not force:
             self.logger.info(f"Found existing cleaning results at {summary_file}")
-            with open(summary_file) as f:
-                existing_summary = json.load(f)
+            try:
+                with open(summary_file) as f:
+                    existing_summary = json.load(f)
+                    
+                self.logger.info("Using existing cleaning results. Use --force-clean to re-run.")
+                self.pipeline_state['stages']['cleaning']['status'] = 'skipped'
+                self.pipeline_state['stages']['cleaning']['stats'] = existing_summary.get('stats', {})
                 
-            self.logger.info("Using existing cleaning results. Use --force-clean to re-run.")
-            self.pipeline_state['stages']['cleaning']['status'] = 'skipped'
-            self.pipeline_state['stages']['cleaning']['stats'] = existing_summary.get('stats', {})
-            return existing_summary
+                # Show completion message for cached results too
+                if not self.verbose:
+                    stats = existing_summary.get('stats', {})
+                    cleaned = stats.get('cleaned', 0)
+                    total = stats.get('total_matched', 0)
+                    
+                    # Count scenes from existing cleaned results
+                    scene_count = 0
+                    for video_name, video_data in existing_summary.get('results', {}).items():
+                        if isinstance(video_data, dict) and video_data.get('status') == 'completed':
+                            # Try multiple ways to get scene count
+                            if 'scenes' in video_data:
+                                scene_count += len(video_data['scenes'])
+                            elif 'cleaned_scenes' in video_data:
+                                scene_count += video_data['cleaned_scenes']
+                            elif 'total_scenes' in video_data:
+                                scene_count += video_data['total_scenes']
+                    print(f" ✓ (using cache: {cleaned}/{total} videos, {scene_count} scenes)")
+                
+                return existing_summary
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Corrupted summary file {summary_file}, will re-run cleaning: {e}")
+                # Continue with cleaning process
             
-        # Run cleaning
-        self.logger.info(f"Running code cleaning for year {year}")
+        # Preprocess parameterized scenes before cleaning
+        self.logger.info("Step 2a: Parameterized Scene Preprocessing")
+        preprocessing_stats = self.preprocess_parameterized_scenes(year, video_filter)
+        
+        # Run cleaning with warning capture
+        self.logger.info(f"Step 2b: Running code cleaning for year {year}")
         self.logger.info(f"Cleaning mode: {self.cleaning_mode}")
         if video_filter:
             self.logger.info(f"Filtering to videos: {video_filter}")
-        summary = self.cleaner.clean_all_matched_videos(
-            year=year, video_filter=video_filter, force=force, mode=self.cleaning_mode,
-            resume=not force  # If forcing, don't resume from checkpoint
-        )
         
-        # Validate cleaned files
+        with capture_syntax_warnings() as warnings_list:
+            summary = self.cleaner.clean_all_matched_videos(
+                year=year, video_filter=video_filter, force=force, mode=self.cleaning_mode,
+                resume=not force  # If forcing, don't resume from checkpoint
+            )
+        
+        # Store warnings for later display
+        self.collected_warnings.extend(warnings_list)
+        
+        # Add preprocessing stats to the summary
+        summary['parameterized_preprocessing'] = preprocessing_stats
+        
+        # Validate cleaned files with warning capture
         self.logger.info("Validating syntax of cleaned files...")
-        validation_results = self.validate_cleaned_files(year)
+        with capture_syntax_warnings() as validation_warnings:
+            validation_results = self.validate_cleaned_files(year)
+        
+        # Store validation warnings
+        self.collected_warnings.extend(validation_warnings)
         
         # Update stats with validation results
         valid_count = sum(1 for v in validation_results.values() if v)
@@ -674,8 +924,16 @@ Performance Metrics:
         
         # Save optimized summary
         summary_file = self.output_dir / f'cleaning_summary_{year}.json'
-        with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
+        temp_file = summary_file.with_suffix('.json.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(summary, f, indent=2)
+            temp_file.replace(summary_file)
+        except Exception as e:
+            self.logger.error(f"Failed to save cleaning summary: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
         self.logger.info(f"Saved optimized cleaning summary to {summary_file}")
         
         # Generate and save human-readable report
@@ -695,6 +953,17 @@ Performance Metrics:
             if agg.get('validation_errors'):
                 self.logger.info(f"  Validation errors: {dict(agg['validation_errors'])}")
         
+        # Log parameterized scene preprocessing statistics
+        if 'parameterized_preprocessing' in summary:
+            prep = summary['parameterized_preprocessing']
+            self.logger.info(f"Parameterized Scene Preprocessing:")
+            self.logger.info(f"  Files checked: {prep['total_files_checked']}")
+            self.logger.info(f"  Parameterized scenes found: {prep['parameterized_files_found']}")
+            self.logger.info(f"  Successfully converted: {prep['files_converted']}")
+            self.logger.info(f"  Parameters converted: {prep['total_parameters_converted']}")
+            if prep['conversion_failures'] > 0:
+                self.logger.warning(f"  Conversion failures: {prep['conversion_failures']}")
+        
         self.pipeline_state['stages']['cleaning']['status'] = 'completed'
         self.pipeline_state['stages']['cleaning']['end_time'] = datetime.now().isoformat()
         self.pipeline_state['stages']['cleaning']['stats'] = summary.get('stats', {})
@@ -703,26 +972,85 @@ Performance Metrics:
         if 'aggregated_stats' in summary:
             self.pipeline_state['stages']['cleaning']['aggregated_stats'] = summary['aggregated_stats']
         
+        # Print completion message
+        if not self.verbose:
+            stats = summary.get('stats', {})
+            cleaned = stats.get('cleaned', 0)
+            total = stats.get('total_matched', 0)
+            
+            # Use accurate scene count: if we actually processed scenes in this run,
+            # use the aggregated stats. If we skipped due to existing results, 
+            # calculate scene count from the actual video results
+            stage_status = self.pipeline_state['stages']['cleaning'].get('status', 'unknown')
+            if stage_status == 'skipped':
+                # Count scenes from existing cleaned results
+                scene_count = 0
+                for video_name, video_data in summary.get('results', {}).items():
+                    if isinstance(video_data, dict) and video_data.get('status') == 'completed':
+                        # Try multiple ways to get scene count
+                        if 'scenes' in video_data:
+                            scene_count += len(video_data['scenes'])
+                        elif 'cleaned_scenes' in video_data:
+                            scene_count += video_data['cleaned_scenes']
+                        elif 'total_scenes' in video_data:
+                            scene_count += video_data['total_scenes']
+                print(f" ✓ (using cache: {cleaned}/{total} videos, {scene_count} scenes)")
+            else:
+                # Use aggregated stats from the actual run
+                scene_count = summary.get('aggregated_stats', {}).get('scene_count', 0)
+                print(f" ✓ ({cleaned}/{total} videos, {scene_count} scenes cleaned)")
+        
         return summary
         
     def run_conversion_stage(self, year: int, force: bool = False, video_filter: Optional[List[str]] = None) -> Dict:
         """Run the ManimGL to ManimCE conversion stage."""
-        self.logger.info("=" * 60)
-        self.logger.info("STAGE 3: ManimCE Conversion")
-        self.logger.info("=" * 60)
+        if not self.verbose:
+            print("[CONVERT] Converting to ManimCE...", end='', flush=True)
+        else:
+            print("\n📊 Stage 3: ManimCE Conversion")
+        self.logger.info("Starting ManimCE conversion stage")
         
-        # Always use integrated converter
-        from integrated_pipeline_converter import integrate_with_pipeline
-        self.logger.info("Using Integrated Converter (with dependency analysis and scene validation)")
-        return integrate_with_pipeline(self, year, video_filter, force)
+        if self.use_systematic_converter:
+            # Use the enhanced systematic converter (DEFAULT)
+            from systematic_pipeline_converter import convert_with_systematic_pipeline
+            unfixable_mode = "MONITORING" if self.monitor_unfixable_only else ("ACTIVE" if self.enable_unfixable_skipping else "DISABLED")
+            self.logger.info(f"Using Enhanced Systematic Converter (DEFAULT - automatic fixes + intelligent Claude fallback)")
+            self.logger.info(f"Unfixable pattern detection: {unfixable_mode}")
+            
+            with capture_syntax_warnings() as conversion_warnings:
+                result = convert_with_systematic_pipeline(self, year, video_filter, force)
+            
+            # Store conversion warnings
+            self.collected_warnings.extend(conversion_warnings)
+            return result
+        else:
+            # Use standard integrated converter (LEGACY)
+            from integrated_pipeline_converter import integrate_with_pipeline
+            self.logger.info("Using Integrated Converter (LEGACY - with dependency analysis and scene validation)")
+            
+            with capture_syntax_warnings() as conversion_warnings:
+                result = integrate_with_pipeline(self, year, video_filter, force)
+            
+            # Store conversion warnings
+            self.collected_warnings.extend(conversion_warnings)
+            return result
 
     def run_rendering_stage(self, year: int, quality: str = 'preview', 
                            limit: Optional[int] = None, scenes_limit: Optional[int] = None,
                            video_filter: Optional[List[str]] = None, force: bool = False) -> Dict:
         """Run the video rendering stage."""
-        self.logger.info("=" * 60)
-        self.logger.info("STAGE 4: Video Rendering")
-        self.logger.info("=" * 60)
+        if not self.verbose:
+            print("[RENDER] Rendering videos...", end='', flush=True)
+        else:
+            print("\n📊 Stage 4: Video Rendering")
+        self.logger.info("Starting video rendering stage")
+        
+        # ENHANCEMENT: Apply runtime fixes before rendering (unless disabled)
+        if not hasattr(self, 'skip_runtime_fixes') or not self.skip_runtime_fixes:
+            self.logger.info("Applying runtime conversion fixes before rendering...")
+            self._apply_runtime_fixes(year, video_filter)
+        else:
+            self.logger.info("Skipping runtime fixes (--skip-runtime-fixes enabled)")
         
         self.pipeline_state['stages']['rendering']['status'] = 'running'
         self.pipeline_state['stages']['rendering']['start_time'] = datetime.now().isoformat()
@@ -732,18 +1060,25 @@ Performance Metrics:
         summary_file = self.logs_dir / f'rendering_summary_{year}_{quality}.json'
         if summary_file.exists() and not force:
             self.logger.info(f"Found existing rendering results at {summary_file}")
-            with open(summary_file) as f:
-                existing_summary = json.load(f)
-                
-            self.logger.info("Using existing rendering results. Use --force-render to re-run.")
-            self.pipeline_state['stages']['rendering']['status'] = 'skipped'
-            self.pipeline_state['stages']['rendering']['stats'] = {
-                'total_videos': existing_summary.get('total_videos', 0),
-                'successful_videos': existing_summary.get('successful_videos', 0),
-                'failed_videos': existing_summary.get('failed_videos', 0),
-                'total_scenes_rendered': existing_summary.get('total_scenes_rendered', 0)
-            }
-            return existing_summary
+            try:
+                with open(summary_file) as f:
+                    existing_summary = json.load(f)
+                    
+                self.logger.info("Using existing rendering results. Use --force-render to re-run.")
+                self.pipeline_state['stages']['rendering']['status'] = 'skipped'
+                self.pipeline_state['stages']['rendering']['stats'] = {
+                    'total_videos': existing_summary.get('total_videos', 0),
+                    'successful_videos': existing_summary.get('successful_videos', 0),
+                    'failed_videos': existing_summary.get('failed_videos', 0),
+                    'partial_videos': existing_summary.get('partial_videos', 0),
+                    'total_scenes_rendered': existing_summary.get('total_scenes_rendered', 0),
+                    'total_render_time': existing_summary.get('total_render_time', 0),
+                    'render_success_rate': (existing_summary.get('total_scenes_rendered', 0) / max(sum(len(v.get('rendered_scenes', [])) + len(v.get('failed_scenes', [])) for v in existing_summary.get('videos', [])), 1)) if existing_summary.get('videos') else 0
+                }
+                return existing_summary
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Corrupted summary file {summary_file}, will re-run rendering: {e}")
+                # Continue with rendering process
             
         # Run rendering
         self.logger.info(f"Running video rendering for year {year}")
@@ -768,8 +1103,16 @@ Performance Metrics:
                 'failed_videos': summary.get('failed_videos', 0),
                 'partial_videos': summary.get('partial_videos', 0),
                 'total_scenes_rendered': summary.get('total_scenes_rendered', 0),
-                'total_render_time': summary.get('total_render_time', 0)
+                'total_render_time': summary.get('total_render_time', 0),
+                'render_success_rate': (summary.get('total_scenes_rendered', 0) / max(sum(len(v.get('rendered_scenes', [])) + len(v.get('failed_scenes', [])) for v in summary.get('videos', [])), 1)) if summary.get('videos') else 0
             }
+            
+            # Print completion message
+            if not self.verbose:
+                # Show both video and scene counts for rendering
+                total_scenes = sum(len(v.get('rendered_scenes', [])) + len(v.get('failed_scenes', [])) for v in summary.get('videos', []))
+                rendered_scenes = summary.get('total_scenes_rendered', 0)
+                print(f" ✓ ({summary.get('successful_videos', 0)}/{summary.get('total_videos', 0)} videos, {rendered_scenes}/{total_scenes} scenes rendered)")
             
         except Exception as e:
             self.logger.error(f"Rendering stage failed: {e}")
@@ -778,6 +1121,24 @@ Performance Metrics:
             return {'error': str(e)}
             
         return summary
+    
+    def _apply_runtime_fixes(self, year: int, video_filter: Optional[List[str]] = None):
+        """Apply runtime conversion fixes to validated snippets before rendering."""
+        try:
+            from fix_runtime_conversion_issues import RuntimeConversionFixer
+            
+            fixer = RuntimeConversionFixer(verbose=self.verbose)
+            result = fixer.fix_video_snippets(year, self.base_dir, video_filter)
+            
+            if result.get('total_files_fixed', 0) > 0:
+                self.logger.info(f"Applied runtime fixes to {result['total_files_fixed']} files")
+            else:
+                self.logger.info("No runtime fixes needed")
+                
+        except ImportError:
+            self.logger.warning("Runtime fixer not available, skipping fixes")
+        except Exception as e:
+            self.logger.warning(f"Failed to apply runtime fixes: {e}")
     
     def archive_old_reports(self, year: int):
         """Archive old pipeline report JSON files, keeping only the latest."""
@@ -811,8 +1172,16 @@ Performance Metrics:
         
         # Save the latest pipeline state JSON (this will be the only one in main output dir)
         latest_report_file = self.output_dir / f'pipeline_report_{year}_latest.json'
-        with open(latest_report_file, 'w') as f:
-            json.dump(self.pipeline_state, f, indent=2)
+        temp_file = latest_report_file.with_suffix('.json.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(self.pipeline_state, f, indent=2)
+            temp_file.replace(latest_report_file)
+        except Exception as e:
+            self.logger.error(f"Failed to save pipeline report: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
             
         # Also append to consolidated history log (one line per run)
         with open(self.consolidated_log_file, 'a') as f:
@@ -854,7 +1223,32 @@ Aggregated Cleaning Metrics:
 Stage 3: ManimCE Conversion (Mode: {self.conversion_mode})
 ---------------------------
 Status: {self.pipeline_state['stages']['conversion']['status']}
-Stats: {json.dumps(self.pipeline_state['stages']['conversion']['stats'], indent=2)}
+Stats: {json.dumps(self.pipeline_state['stages']['conversion']['stats'], indent=2)}"""
+        
+        # Add unfixable pattern statistics if available
+        conversion_stats = self.pipeline_state['stages']['conversion'].get('stats', {})
+        if 'unfixable_patterns' in conversion_stats:
+            unfixable = conversion_stats['unfixable_patterns']
+            report_text += f"""
+
+Unfixable Pattern Detection:
+  - Mode: {"MONITORING" if unfixable.get('monitor_mode', True) else "ACTIVE"}
+  - Claude calls that would be skipped: {unfixable.get('skipped', 0)}
+  - Claude calls attempted: {unfixable.get('attempted', 0)}"""
+            
+            if unfixable.get('patterns'):
+                report_text += "\n  - Top patterns detected:"
+                for pattern, count in sorted(unfixable['patterns'].items(), 
+                                           key=lambda x: x[1], reverse=True)[:3]:
+                    report_text += f"\n    * {pattern}: {count} occurrences"
+                    
+            total_claude_candidates = unfixable.get('skipped', 0) + unfixable.get('attempted', 0)
+            if total_claude_candidates > 0:
+                skip_rate = unfixable.get('skipped', 0) / total_claude_candidates
+                report_text += f"\n  - Potential API call reduction: {skip_rate:.1%}"
+                report_text += f"\n  - Estimated cost savings: ${unfixable.get('skipped', 0) * 0.03:.2f}"
+
+        report_text += f"""
 
 Stage 4: Video Rendering
 ------------------------
@@ -864,23 +1258,169 @@ Stats: {json.dumps(self.pipeline_state['stages']['rendering']['stats'], indent=2
 Total Duration: {self.pipeline_state.get('duration_seconds', 0):.1f} seconds
 
 Output Locations:
-- Video directories: {self.output_dir}/{year}/[video_name]/
-  - matches.json: Matching results
-  - cleaned_code.py: Cleaned and inlined code
-  - manimce_code.py: Converted ManimCE code
-  - rendered_videos/: Rendered video files
-  - logs.json: Video-specific processing logs
+- Video directories: {self.output_dir}/{year}/"""
+        
+        # Add actual video names to the detailed report
+        year_dir = self.output_dir / str(year)
+        if year_dir.exists():
+            processed_videos = [d.name for d in year_dir.iterdir() if d.is_dir()]
+            if processed_videos:
+                report_text += f"\n  Videos processed: {', '.join(processed_videos[:10])}"
+                if len(processed_videos) > 10:
+                    report_text += f" ... and {len(processed_videos) - 10} more"
+        
+        report_text += f"""
 - Logs: {self.logs_dir}/
 - Archive: {self.archive_dir}/
+
+Each video directory contains:
+  - matches.json: Matching results
+  - .pipeline/intermediate/monolith_manimgl.py: Cleaned and inlined code
+  - validated_snippets/: Final ManimCE snippets (individual files)
+  - monolith_manimce.py: Final ManimCE code (monolithic file)
+  - videos/: Rendered video files (if rendered)
+  - .pipeline/logs/: Processing logs
 """
         
         report_text_file = self.output_dir / f'pipeline_report_{year}.txt'
         with open(report_text_file, 'w') as f:
             f.write(report_text)
             
-        print(report_text)
+        # Print clean formatted report
+        if self.verbose:
+            print("\n" + "="*60)
+            print("🎯 PIPELINE COMPLETE")
+            print("="*60)
+            print(f"Year: {year}")
+            print(f"Duration: {self.pipeline_state.get('duration_seconds', 0):.1f}s")
+            
+            # Print stage summaries
+            for stage_name, stage_data in self.pipeline_state['stages'].items():
+                status = stage_data.get('status', 'unknown')
+                emoji = "✅" if status == 'completed' else "⏭️" if status == 'skipped' else "❌" if status == 'failed' else "⏸️"
+                print(f"{emoji} {stage_name.upper()}: {status}")
+                
+                # Show key stats for each stage
+                stats = stage_data.get('stats', {})
+                if stage_name == 'matching' and stats:
+                    print(f"   📊 {stats.get('total_videos', 0)} videos, {stats.get('successful_matches', 0)} matched")
+                elif stage_name == 'cleaning' and stats:
+                    cleaned = stats.get('cleaned', 0)
+                    failed = stats.get('failed', 0)
+                    
+                    # Get scene count from aggregated stats
+                    agg_stats = stage_data.get('aggregated_stats', {})
+                    scene_count = agg_stats.get('scene_count', 0)
+                    
+                    # If no aggregated stats (e.g., when skipped), try to load from cleaning summary
+                    if scene_count == 0 and cleaned > 0:
+                        try:
+                            summary_file = self.output_dir / f'cleaning_summary_{year}.json'
+                            if summary_file.exists():
+                                with open(summary_file) as f:
+                                    cleaning_summary = json.load(f)
+                                    scene_count = cleaning_summary.get('aggregated_stats', {}).get('scene_count', 0)
+                        except:
+                            pass  # Fallback to 0 if can't load summary
+                    
+                    print(f"   📊 {cleaned} videos cleaned, {scene_count} scenes processed")
+                elif stage_name == 'conversion' and stats:
+                    # Handle both old and new key formats from different converters
+                    converted = stats.get('converted', stats.get('successful_videos', 0))
+                    failed = stats.get('failed', stats.get('failed_videos', 0))
+                    
+                    # Calculate scene stats from video details if available
+                    total_scenes = 0
+                    successful_scenes = 0
+                    if 'videos' in stats:
+                        for video_name, video_data in stats['videos'].items():
+                            if isinstance(video_data, dict):
+                                total_scenes += video_data.get('total_scenes', 0)
+                                successful_scenes += video_data.get('successful_scenes', 0)
+                    
+                    # Fallback to syntax_validation stats if video details not available
+                    if total_scenes == 0 and 'syntax_validation' in stats:
+                        successful_scenes = stats['syntax_validation']['syntax_valid_snippets']
+                        total_scenes = stats['syntax_validation']['total_snippets_attempted']
+                    
+                    if total_scenes > 0:
+                        print(f"   📊 {converted} videos converted, {successful_scenes}/{total_scenes} scenes")
+                    else:
+                        print(f"   📊 {converted} converted, {failed} failed")
+                elif stage_name == 'rendering' and stats:
+                    successful_videos = stats.get('successful_videos', 0)
+                    total_scenes_rendered = stats.get('total_scenes_rendered', 0)
+                    
+                    # Calculate total scenes attempted from rendering summary if available
+                    total_scenes_attempted = 0
+                    try:
+                        # Check for rendering summary file
+                        render_summary_file = self.output_dir / f'logs/rendering_summary_{year}_preview.json'
+                        if not render_summary_file.exists():
+                            # Try alternate location
+                            render_summary_file = self.output_dir / f'{year}/rendering_summary_preview.json'
+                        
+                        if render_summary_file.exists():
+                            with open(render_summary_file) as f:
+                                render_summary = json.load(f)
+                                # Sum up total_scenes from all videos
+                                for video in render_summary.get('videos', []):
+                                    if isinstance(video, dict):
+                                        total_scenes_attempted += video.get('total_scenes', 0)
+                    except:
+                        pass  # Fallback to stats only
+                    
+                    success_rate = stats.get('render_success_rate', 0)
+                    if total_scenes_attempted > 0:
+                        print(f"   📊 {successful_videos} videos rendered, {total_scenes_rendered}/{total_scenes_attempted} scenes ({success_rate:.1%} success)")
+                    else:
+                        print(f"   📊 {successful_videos} videos rendered, {total_scenes_rendered} scenes ({success_rate:.1%} success)")
+            
+            print(f"\n📁 Output: {self.output_dir}/{year}/")
+            print(f"📄 Report: {latest_report_file}")
+            print(f"📝 Logs: {self.logs_dir}/")
+            print("="*60)
+        else:
+            # Compact completion summary for non-verbose
+            print(f"\nCOMPLETE in {self.pipeline_state.get('duration_seconds', 0):.1f}s")
+            
+            # Quick stats summary
+            conversion_stats = self.pipeline_state['stages'].get('conversion', {}).get('stats', {})
+            if conversion_stats:
+                systematic_eff = conversion_stats.get('systematic_efficiency', 0)
+                if systematic_eff > 0:
+                    print(f"  - {systematic_eff:.1%} handled systematically")
+            
+            print(f"Output: {self.output_dir}/{year}/")
+            print(f"Report: {latest_report_file}")
+        
+        # Display collected warnings at the end (if any)
+        self._display_collected_warnings()
+        
         self.logger.info(f"Pipeline report saved to {latest_report_file}")
-        self.logger.info(f"Pipeline history appended to {self.consolidated_log_file}")
+        
+    def _display_collected_warnings(self):
+        """Display collected syntax warnings in a clean, organized way."""
+        if not self.collected_warnings:
+            return
+            
+        # Deduplicate warnings
+        unique_warnings = list(set(self.collected_warnings))
+        if not unique_warnings:
+            return
+            
+        if self.verbose:
+            print(f"\n⚠️  SYNTAX WARNINGS ({len(unique_warnings)} unique)")
+            print("=" * 50)
+            for warning in unique_warnings[:10]:  # Show first 10
+                print(f"  {warning}")
+            if len(unique_warnings) > 10:
+                print(f"  ... and {len(unique_warnings) - 10} more warnings")
+            print("=" * 50)
+        else:
+            # Non-verbose: just show count
+            if len(unique_warnings) > 0:
+                print(f"⚠️  {len(unique_warnings)} syntax warnings (use --verbose to see details)")
         
     def run_full_pipeline(self, year: int = 2015, skip_matching: bool = False,
                          skip_cleaning: bool = False, skip_conversion: bool = False,
@@ -893,14 +1433,40 @@ Output Locations:
         """Run the complete dataset building pipeline."""
         self.pipeline_state['start_time'] = datetime.now().isoformat()
         
-        self.logger.info("Starting 3Blue1Brown Dataset Pipeline")
-        self.logger.info(f"Year: {year}")
-        self.logger.info(f"Skip matching: {skip_matching}")
-        self.logger.info(f"Skip cleaning: {skip_cleaning}")
-        self.logger.info(f"Skip conversion: {skip_conversion}")
-        self.logger.info(f"Skip rendering: {skip_rendering}")
-        if video_filter:
-            self.logger.info(f"Video filter: {video_filter}")
+        # Print clean startup banner
+        if self.verbose:
+            print("\n" + "="*60)
+            print("🚀 3BLUE1BROWN DATASET PIPELINE")
+            print("="*60)
+            print(f"📅 Year: {year}")
+            print(f"🔧 Mode: {self.cleaning_mode} cleaning, {self.conversion_mode} conversion")
+            
+            # Show which stages will run
+            stages = []
+            if not skip_matching: stages.append("matching")
+            if not skip_cleaning: stages.append("cleaning")
+            if not skip_conversion: stages.append("conversion")
+            if not skip_rendering: stages.append("rendering")
+            
+            print(f"⚙️  Stages: {' → '.join(stages)}")
+            if video_filter:
+                print(f"🎬 Videos: {', '.join(video_filter)}")
+            print("="*60 + "\n")
+        else:
+            # Compact startup for non-verbose
+            stages = []
+            if not skip_matching: stages.append("match")
+            if not skip_cleaning: stages.append("clean")
+            if not skip_conversion: stages.append("convert")
+            if not skip_rendering: stages.append("render")
+            
+            print(f"\n3BLUE1BROWN PIPELINE")
+            print(f"Year: {year} | Stages: {' → '.join(stages)}")
+            if video_filter:
+                print(f"Videos: {', '.join(video_filter[:3])}{'...' if len(video_filter) > 3 else ''}")
+            print("")
+        
+        self.logger.info(f"Starting pipeline for year {year} with stages: {', '.join(stages)}")
         
         # Count total stages to run
         stages_to_run = sum([
@@ -916,30 +1482,27 @@ Output Locations:
             if not skip_matching:
                 self.run_matching_stage(year, force=force_match, video_filter=video_filter)
                 stages_completed += 1
-                if self.verbose and stages_to_run > 1:
-                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
-                self.logger.info("Skipping matching stage")
+                if self.verbose:
+                    print("⏭️ Skipping matching stage (use --match-only to run)")
                 self.pipeline_state['stages']['matching']['status'] = 'skipped'
                 
             # Stage 2: Cleaning
             if not skip_cleaning:
                 self.run_cleaning_stage(year, force=force_clean, video_filter=video_filter)
                 stages_completed += 1
-                if self.verbose and stages_to_run > 1:
-                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
-                self.logger.info("Skipping cleaning stage")
+                if self.verbose:
+                    print("⏭️ Skipping cleaning stage (use --clean-only to run)")
                 self.pipeline_state['stages']['cleaning']['status'] = 'skipped'
                 
             # Stage 3: Conversion
             if not skip_conversion:
                 self.run_conversion_stage(year, force=force_convert, video_filter=video_filter)
                 stages_completed += 1
-                if self.verbose and stages_to_run > 1:
-                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
-                self.logger.info("Skipping conversion stage")
+                if self.verbose:
+                    print("⏭️ Skipping conversion stage (use --convert-only to run)")
                 self.pipeline_state['stages']['conversion']['status'] = 'skipped'
                 
             # Stage 4: Rendering
@@ -948,10 +1511,9 @@ Output Locations:
                                        limit=render_limit, scenes_limit=render_scenes_limit,
                                        video_filter=video_filter, force=force_render)
                 stages_completed += 1
-                if self.verbose and stages_to_run > 1:
-                    print(f"\n\n🎯 Pipeline Progress: {stages_completed}/{stages_to_run} stages complete ({stages_completed/stages_to_run*100:.0f}%)\n")
             else:
-                self.logger.info("Skipping rendering stage")
+                if self.verbose:
+                    print("⏭️ Skipping rendering stage (use --render or --render-only to run)")
                 self.pipeline_state['stages']['rendering']['status'] = 'skipped'
                 
         except Exception as e:
@@ -1023,12 +1585,26 @@ def main():
                         help='Run only pre-compile validation without rendering')
     parser.add_argument('--no-auto-fix', action='store_true',
                         help='Disable automatic fixes during pre-compile validation')
-    parser.add_argument('--cleaning-mode', choices=['monolithic', 'scene'], default='scene',
-                        help='Cleaning mode: scene-by-scene (default) or monolithic')
+    parser.add_argument('--cleaning-mode', choices=['hybrid', 'programmatic', 'claude', 'monolithic', 'scene', 'simple'], default='hybrid',
+                        help='Cleaning mode: hybrid (programmatic+fallback, DEFAULT), simple (just include all files), programmatic-only, claude-only, or legacy modes')
     parser.add_argument('--conversion-mode', choices=['monolithic', 'scene'], default='scene',
                         help='Conversion mode: scene-by-scene (default) or monolithic')
+    parser.add_argument('--no-systematic-converter', action='store_true',
+                        help='Disable enhanced systematic converter and use integrated converter only (NOT recommended - increases Claude API usage by ~500%%)')
+    parser.add_argument('--use-systematic-converter', action='store_true',
+                        help='Use enhanced systematic converter with automatic fixes (DEFAULT - reduces Claude API usage by ~85%%)')
     parser.add_argument('--parallel-render', type=int, default=1,
                         help='Number of parallel workers for rendering scenes (default: 1)')
+    parser.add_argument('--disable-unfixable-skipping', action='store_true',
+                        help='Disable active unfixable pattern detection (allow Claude calls for definitely unfixable issues)')
+    parser.add_argument('--monitor-unfixable-only', action='store_true',
+                        help='Monitor unfixable patterns without skipping Claude calls (log what would be skipped)')
+    parser.add_argument('--min-conversion-confidence', type=float, default=0.8,
+                        help='Minimum conversion confidence to attempt scene conversion (default: 0.8, range: 0.0-1.0)')
+    parser.add_argument('--skip-runtime-fixes', action='store_true',
+                        help='Skip automatic runtime fixes before rendering (not recommended)')
+    parser.add_argument('--runtime-fixes-only', action='store_true',
+                        help='Only apply runtime fixes, skip actual rendering')
     
     args = parser.parse_args()
     
@@ -1062,11 +1638,22 @@ def main():
         args.render_limit = args.render_limit or 5
         args.render_scenes_limit = args.render_scenes_limit or 2
     
+    # Handle runtime fixes only
+    if args.runtime_fixes_only:
+        args.skip_matching = True
+        args.skip_cleaning = True
+        args.skip_conversion = True
+        args.render = False
+    
     # Integrated converter is now always used
     use_integrated = True
     
     # Create pipeline builder
     base_dir = Path(__file__).parent.parent
+    
+    # Determine systematic converter usage - default True, disable with --no-systematic-converter
+    use_systematic = not args.no_systematic_converter
+    
     builder = DatasetPipelineBuilder(base_dir, verbose=args.verbose, 
                                     timeout_multiplier=args.timeout_multiplier,
                                     max_retries=args.max_retries,
@@ -1077,7 +1664,29 @@ def main():
                                     auto_fix_precompile=not args.no_auto_fix,
                                     cleaning_mode=args.cleaning_mode,
                                     conversion_mode=args.conversion_mode,
-                                    parallel_render_workers=args.parallel_render)
+                                    parallel_render_workers=args.parallel_render,
+                                    use_systematic_converter=use_systematic,
+                                    enable_unfixable_skipping=not args.disable_unfixable_skipping,
+                                    monitor_unfixable_only=args.monitor_unfixable_only,
+                                    min_conversion_confidence=args.min_conversion_confidence)
+    
+    # Set runtime fixes preference
+    builder.skip_runtime_fixes = args.skip_runtime_fixes
+    
+    # Handle runtime fixes only mode
+    if args.runtime_fixes_only:
+        from fix_runtime_conversion_issues import RuntimeConversionFixer
+        fixer = RuntimeConversionFixer(verbose=args.verbose)
+        result = fixer.fix_video_snippets(args.year, base_dir, args.video)
+        
+        print(f"Runtime fixes completed for {args.year}:")
+        print(f"Videos processed: {result['videos_processed']}/{result['total_videos']}")
+        print(f"Total files fixed: {result['total_files_fixed']}")
+        
+        for video_name, video_result in result['video_results'].items():
+            if video_result.get('files_fixed', 0) > 0:
+                print(f"  {video_name}: {video_result['files_fixed']} files fixed")
+        return
     
     # Run pipeline
     builder.run_full_pipeline(

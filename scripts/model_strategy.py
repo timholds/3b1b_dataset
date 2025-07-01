@@ -12,8 +12,8 @@ from typing import Dict, Optional
 MODEL_STRATEGY = {
     # Complex reasoning tasks - need Opus
     "match_videos": "opus",                    # Searching large codebases
-    "initial_conversion": "opus",              # First attempt at ManimGL->CE conversion
-    "complex_render_fix": "opus",              # Fixing complex render errors
+    "initial_conversion": "sonnet",              # First attempt at ManimGL->CE conversion
+    "complex_render_fix": "sonnet",              # Fixing complex render errors
     
     # Mechanical/pattern-based tasks - Sonnet is fine
     "clean_code": "sonnet",             # Code cleaning, import inlining

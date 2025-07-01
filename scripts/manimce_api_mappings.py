@@ -231,6 +231,105 @@ METHOD_TO_PROPERTY_MAPPINGS: Dict[str, Dict[str, Any]] = {
         'param_mappings': {
             'color': 'color'
         }
+    },
+    
+    # Pi Creature instance methods - comment out as no ManimCE equivalent
+    'change': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature emotion change method'
+    },
+    'look_at': {
+        'method': None,
+        'special_handling': 'Comment out when used on Pi Creatures',
+        'notes': 'Pi Creature look direction method'
+    },
+    'blink': {
+        'method': None,
+        'special_handling': 'Comment out when used on Pi Creatures',
+        'notes': 'Pi Creature blink method'
+    },
+    'wave': {
+        'method': None,
+        'special_handling': 'Comment out when used on Pi Creatures',
+        'notes': 'Pi Creature wave method'
+    },
+    'get_bubble': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature bubble creation method'
+    },
+    'says': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature speech method'
+    },
+    'thinks': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature thought method'
+    },
+    
+    # TeacherStudentsScene methods - comment out as no ManimCE equivalent
+    'student_says': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene student speech method'
+    },
+    'teacher_says': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene teacher speech method'
+    },
+    'student_thinks': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene student thought method'
+    },
+    'teacher_thinks': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene teacher thought method'
+    },
+    'play_student_changes': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene animation method'
+    },
+    'change_students': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene student emotion method'
+    },
+    'get_student_changes': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene method for getting student change animations'
+    },
+    'random_blink_wait': {
+        'method': None,
+        'special_handling': 'Comment out - TeacherStudentsScene method',
+        'notes': 'TeacherStudentsScene method for random blinking'
+    },
+    'shift_onto_screen': {
+        'method': None,
+        'special_handling': 'Comment out when used on Pi Creatures',
+        'notes': 'Pi Creature method for moving onto screen'
+    },
+    'change_mode': {
+        'method': None,
+        'special_handling': 'Comment out when used on Pi Creatures',
+        'notes': 'Pi Creature method for changing emotional state'
+    },
+    'bubble_thought': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature method for thought bubbles'
+    },
+    'bubble_speak': {
+        'method': None,
+        'special_handling': 'Comment out - Pi Creature method',
+        'notes': 'Pi Creature method for speech bubbles'
     }
 }
 
@@ -350,6 +449,60 @@ CLASS_MAPPINGS: Dict[str, Dict[str, Any]] = {
         'new_class': None,
         'special_handling': 'Comment out - no equivalent',
         'notes': 'Proprietary 3b1b asset'
+    },
+    'ThoughtBubble': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Proprietary 3b1b asset - part of Pi Creature system'
+    },
+    'SpeechBubble': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Proprietary 3b1b asset - part of Pi Creature system'
+    },
+    'SimpleTex': {
+        'new_class': 'MathTex',
+        'param_mappings': {},
+        'notes': 'SimpleTex is a specialized Tex class - map to MathTex'
+    },
+    
+    # Pi Creature animations - comment out as no ManimCE equivalent
+    'WaveArm': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Pi Creature animation - proprietary 3b1b asset'
+    },
+    'BlinkPiCreature': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Pi Creature animation - proprietary 3b1b asset'
+    },
+    'Blink': {
+        'new_class': None,
+        'special_handling': 'Comment out when used with Pi Creatures',
+        'notes': 'Generic animation but often used with Pi Creatures'
+    },
+    'RemovePiCreatureBubble': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Pi Creature bubble animation - proprietary 3b1b asset'
+    },
+    'PiCreatureBubbleIntroduction': {
+        'new_class': None,
+        'special_handling': 'Comment out - no equivalent',
+        'notes': 'Pi Creature bubble introduction animation - proprietary 3b1b asset'
+    },
+    
+    # Pi Creature scene classes
+    'PiCreatureScene': {
+        'new_class': 'Scene',
+        'special_handling': 'Remove Pi Creature methods and convert to basic Scene',
+        'notes': 'Scene with Pi Creature functionality - needs cleanup'
+    },
+    'TeacherStudentsScene': {
+        'new_class': 'Scene',
+        'special_handling': 'Remove Pi Creature methods and convert to basic Scene',
+        'notes': 'Classroom scene with Pi Creatures - needs cleanup'
     }
 }
 
@@ -492,6 +645,40 @@ COMPLEX_PATTERNS: Dict[str, Dict[str, Any]] = {
         'pattern': r'set_camera_orientation\(',
         'handler': 'update_camera_calls',
         'description': '3D camera API updates'
+    },
+    'pi_creature_functions': {
+        'pattern': r'def\s+(draw_you|create_pi_creature|make_pi_creature)\s*\(',
+        'handler': 'comment_out_pi_creature_functions',
+        'description': 'Comment out Pi Creature helper functions'
+    }
+}
+
+# Pi Creature function patterns to remove completely
+PI_CREATURE_FUNCTION_PATTERNS: Dict[str, Dict[str, Any]] = {
+    'draw_you': {
+        'pattern': r'def\s+draw_you\s*\([^)]*\):',
+        'action': 'comment_out_function',
+        'notes': 'Pi Creature helper function - no ManimCE equivalent'
+    },
+    'create_pi_creature': {
+        'pattern': r'def\s+create_pi_creature\s*\([^)]*\):',
+        'action': 'comment_out_function',
+        'notes': 'Pi Creature creation helper - no ManimCE equivalent'
+    },
+    'make_pi_creature': {
+        'pattern': r'def\s+make_pi_creature\s*\([^)]*\):',
+        'action': 'comment_out_function',
+        'notes': 'Pi Creature creation helper - no ManimCE equivalent'
+    },
+    'get_pi_creature': {
+        'pattern': r'def\s+get_pi_creature\s*\([^)]*\):',
+        'action': 'comment_out_function',
+        'notes': 'Pi Creature getter function - no ManimCE equivalent'
+    },
+    'setup_pi_creature': {
+        'pattern': r'def\s+setup_pi_creature\s*\([^)]*\):',
+        'action': 'comment_out_function',
+        'notes': 'Pi Creature setup function - no ManimCE equivalent'
     }
 }
 
@@ -610,3 +797,24 @@ def get_all_manimce_imports() -> List[str]:
         # Utilities
         'config', 'rate_functions',
     ]
+
+def get_pi_creature_function_patterns() -> Dict[str, Dict[str, Any]]:
+    """Get all Pi Creature function patterns that should be commented out."""
+    return PI_CREATURE_FUNCTION_PATTERNS
+
+def is_pi_creature_related(name: str) -> bool:
+    """Check if a name is related to Pi Creatures and should be commented out."""
+    pi_creature_names = {
+        'PiCreature', 'Randolph', 'Mortimer', 'ThoughtBubble', 'SpeechBubble',
+        'WaveArm', 'BlinkPiCreature', 'Blink', 'RemovePiCreatureBubble',
+        'PiCreatureBubbleIntroduction', 'PiCreatureScene', 'TeacherStudentsScene', 
+        'draw_you', 'get_bubble_introduction'
+    }
+    pi_creature_methods = {
+        'change', 'look_at', 'blink', 'wave', 'get_bubble', 'says', 'thinks',
+        'student_says', 'teacher_says', 'student_thinks', 'teacher_thinks',
+        'play_student_changes', 'change_students', 'get_student_changes',
+        'random_blink_wait', 'shift_onto_screen', 'change_mode', 
+        'bubble_thought', 'bubble_speak'
+    }
+    return name in pi_creature_names or name in pi_creature_methods
