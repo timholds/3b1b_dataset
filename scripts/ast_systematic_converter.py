@@ -670,53 +670,113 @@ class ASTSystematicConverter:
                 
             def visit_Assign(self, node):
                 """Fix problematic assignment patterns."""
-                # Fix list unpacking like: a, b, c = [Text('long string')]
+                # Fix list unpacking like: a, b, c = [Text('long string')] or (a, b, c) = [Text('long string')]
                 if (isinstance(node.targets[0], (ast.Tuple, ast.List)) and
                     len(node.targets[0].elts) > 1 and
                     isinstance(node.value, ast.List) and
                     len(node.value.elts) == 1):
                     
-                    # Check if the single value is a Text call with space-separated content
-                    if (isinstance(node.value.elts[0], ast.Call) and
-                        isinstance(node.value.elts[0].func, ast.Name) and
-                        node.value.elts[0].func.id in ['Text', 'MathTex', 'Tex'] and
-                        len(node.value.elts[0].args) >= 1 and
-                        isinstance(node.value.elts[0].args[0], ast.Constant) and
-                        isinstance(node.value.elts[0].args[0].value, str)):
+                    expected_parts = len(node.targets[0].elts)
+                    single_value = node.value.elts[0]
+                    
+                    # Check if the single value is a function call (Text, MathTex, etc.)
+                    if (isinstance(single_value, ast.Call) and
+                        isinstance(single_value.func, ast.Name)):
                         
-                        text_content = node.value.elts[0].args[0].value
-                        expected_parts = len(node.targets[0].elts)
-                        original_func = node.value.elts[0].func.id
+                        func_name = single_value.func.id
                         
-                        # Try to split the text into expected parts
-                        if '  ' in text_content:  # Multiple spaces indicate separate elements
-                            parts = [part.strip() for part in text_content.split('  ') if part.strip()]
-                            if len(parts) == expected_parts:
-                                # Create separate objects for each part
+                        # Handle Text/MathTex/Tex calls with LIST ARGUMENT (most complex case)
+                        if (func_name in ['Text', 'MathTex', 'Tex'] and
+                            len(single_value.args) >= 1 and
+                            isinstance(single_value.args[0], ast.List)):
+                            
+                            # Text([list_of_strings]) - create individual Text objects for each list element
+                            text_list = single_value.args[0]
+                            if len(text_list.elts) == expected_parts:
+                                # Perfect match - create individual objects
                                 new_elts = []
-                                for part in parts:
+                                for elt in text_list.elts:
                                     new_elts.append(
                                         ast.Call(
-                                            func=ast.Name(id=original_func, ctx=ast.Load()),
-                                            args=[ast.Constant(value=part)],
-                                            keywords=node.value.elts[0].keywords
+                                            func=ast.Name(id=func_name, ctx=ast.Load()),
+                                            args=[elt],
+                                            keywords=single_value.keywords
                                         )
                                     )
                                 node.value.elts = new_elts
+                                self.converter.stats.transformations_applied += 1
+                                self.converter.stats.patterns_matched['list_unpack_text_list'] = \
+                                    self.converter.stats.patterns_matched.get('list_unpack_text_list', 0) + 1
+                                return node
+                        
+                        # Handle Text/MathTex/Tex calls with string content
+                        elif (func_name in ['Text', 'MathTex', 'Tex'] and
+                              len(single_value.args) >= 1 and
+                              isinstance(single_value.args[0], ast.Constant) and
+                              isinstance(single_value.args[0].value, str)):
+                            
+                            text_content = single_value.args[0].value
+                            
+                            # Try to split the text into expected parts
+                            if '  ' in text_content:  # Multiple spaces indicate separate elements
+                                parts = [part.strip() for part in text_content.split('  ') if part.strip()]
+                                if len(parts) == expected_parts:
+                                    # Create separate objects for each part
+                                    new_elts = []
+                                    for part in parts:
+                                        new_elts.append(
+                                            ast.Call(
+                                                func=ast.Name(id=func_name, ctx=ast.Load()),
+                                                args=[ast.Constant(value=part)],
+                                                keywords=single_value.keywords
+                                            )
+                                        )
+                                    node.value.elts = new_elts
+                                    self.converter.stats.transformations_applied += 1
+                                    self.converter.stats.patterns_matched['list_unpack_text_split'] = \
+                                        self.converter.stats.patterns_matched.get('list_unpack_text_split', 0) + 1
+                                    return node
+                    
+                    # Fallback: Create separate calls for each target variable
+                    # Generate meaningful names for each variable
+                    new_elts = []
+                    for i, target in enumerate(node.targets[0].elts):
+                        if isinstance(target, ast.Name):
+                            var_name = target.id
+                            # Create a Text object with the variable name
+                            new_elts.append(
+                                ast.Call(
+                                    func=ast.Name(id='Text', ctx=ast.Load()),
+                                    args=[ast.Constant(value=var_name)],
+                                    keywords=[]
+                                )
+                            )
                         else:
-                            # If we can't split properly, duplicate the single element
-                            original_call = node.value.elts[0]
-                            new_elts = []
-                            for i in range(expected_parts):
-                                # Create a copy of the original call for each target
-                                import copy
-                                new_elts.append(copy.deepcopy(original_call))
-                            node.value.elts = new_elts
+                            # Fallback to duplicating the original call
+                            import copy
+                            new_elts.append(copy.deepcopy(single_value))
+                    
+                    node.value.elts = new_elts
+                    self.converter.stats.transformations_applied += 1
+                    self.converter.stats.patterns_matched['list_unpack_fallback'] = \
+                        self.converter.stats.patterns_matched.get('list_unpack_fallback', 0) + 1
                 
                 return self.generic_visit(node)
             
             def visit_Call(self, node):
                 """Fix problematic function calls."""
+                # Fix double-prefix errors like MathMathTex, TexTex, etc.
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                    
+                    # Check for doubled prefixes
+                    if func_name.startswith('MathMath') and func_name.endswith('Tex'):
+                        node.func.id = 'MathTex'
+                    elif func_name.startswith('TexTex'):
+                        node.func.id = 'Tex'
+                    elif func_name.startswith('TextText'):
+                        node.func.id = 'Text'
+                
                 # Fix Tex() calls with LaTeX math - convert to MathTex
                 if (isinstance(node.func, ast.Name) and
                     node.func.id == 'Tex' and
@@ -730,24 +790,33 @@ class ASTSystematicConverter:
                         # Convert Tex to MathTex for math content
                         node.func.id = 'MathTex'
                 
-                # Fix Arrow constructor conflicts
+                # Fix Arrow constructor conflicts - more comprehensive approach
                 if (isinstance(node.func, ast.Name) and
-                    node.func.id == 'Arrow' and
-                    len(node.args) >= 1):
+                    node.func.id == 'Arrow'):
                     
-                    # Check for start= keyword in the middle of positional args
+                    # Check for start= keyword argument
                     start_keyword = None
+                    start_keyword_index = None
                     for i, kw in enumerate(node.keywords):
                         if kw.arg == 'start':
                             start_keyword = kw
+                            start_keyword_index = i
                             break
                     
-                    if start_keyword and len(node.args) >= 2:
-                        # Remove the start keyword and make it the first positional arg
-                        node.keywords = [kw for kw in node.keywords if kw.arg != 'start']
-                        # Move the start value to be the first arg, end second
-                        new_args = [start_keyword.value, node.args[0]] + node.args[1:]
-                        node.args = new_args
+                    if start_keyword:
+                        # Remove the start keyword from keywords
+                        node.keywords = [kw for i, kw in enumerate(node.keywords) if i != start_keyword_index]
+                        
+                        if len(node.args) >= 1:
+                            # Arrow(end, start=start) → Arrow(start, end)
+                            end_arg = node.args[0]
+                            start_arg = start_keyword.value
+                            node.args = [start_arg, end_arg] + node.args[1:]
+                        else:
+                            # Arrow(start=start) → Arrow(ORIGIN, start) (fallback)
+                            start_arg = start_keyword.value
+                            origin = ast.Name(id='ORIGIN', ctx=ast.Load())
+                            node.args = [origin, start_arg]
                 
                 # Fix Color.range_to() method calls
                 if (isinstance(node.func, ast.Attribute) and

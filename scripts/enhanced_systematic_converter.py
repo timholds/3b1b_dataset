@@ -66,6 +66,23 @@ except ImportError:
     ValidationFailureRecovery = None
     logger.warning("Validation failure recovery not available - many simple fixes will be missed!")
 
+try:
+    from strategic_fallback_triggers import StrategicFallbackAnalyzer, analyze_post_conversion_quality
+except ImportError:
+    # Fallback if strategic triggers not available
+    StrategicFallbackAnalyzer = None
+    analyze_post_conversion_quality = None
+    logger.warning("Strategic fallback triggers not available - using basic fallback logic only")
+
+try:
+    from comprehensive_validation import ComprehensiveValidator, validate_pre_conversion, validate_post_conversion
+except ImportError:
+    # Fallback if comprehensive validation not available
+    ComprehensiveValidator = None
+    validate_pre_conversion = None
+    validate_post_conversion = None
+    logger.warning("Comprehensive validation not available - using basic validation only")
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -97,6 +114,7 @@ class EnhancedSystematicConverter:
         self.ast_converter = ASTSystematicConverter() if ASTSystematicConverter else None
         self.manual_fixer = ManualSceneFixer(verbose=True) if ManualSceneFixer else None
         self.validation_recovery = ValidationFailureRecovery(verbose=True) if ValidationFailureRecovery else None
+        self.strategic_analyzer = StrategicFallbackAnalyzer() if StrategicFallbackAnalyzer else None
         self.min_conversion_confidence = min_conversion_confidence
         
         # Initialize Claude converter with unfixable pattern detection settings
@@ -148,6 +166,74 @@ class EnhancedSystematicConverter:
         
         logger.info(f"Converting scene: {scene_name}")
         
+        # Phase 0: Comprehensive pre-conversion validation (NEW)
+        should_use_claude_early = False
+        strategic_triggers = []
+        pre_validation_result = None
+        
+        if validate_pre_conversion:
+            logger.info("Phase 0a: Comprehensive pre-conversion validation...")
+            pre_validation_result = validate_pre_conversion(scene_code, scene_name)
+            
+            if not pre_validation_result.is_valid:
+                logger.warning(f"⚠️ Pre-conversion validation failed for {scene_name}: {pre_validation_result.issues}")
+            
+            if pre_validation_result.should_use_claude:
+                should_use_claude_early = True
+                logger.info(f"🔄 Pre-validation recommends Claude for {scene_name} (confidence: {pre_validation_result.confidence:.2f})")
+        
+        # Phase 0b: Strategic fallback analysis (if comprehensive validation not available)
+        adjusted_confidence = pre_validation_result.confidence if pre_validation_result else 1.0
+        
+        if self.strategic_analyzer and not should_use_claude_early:
+            # Get initial fix count estimate for strategic analysis
+            initial_systematic_result = self.systematic_fixer.fix_code(scene_code)
+            fix_count = len(initial_systematic_result.fixes_applied)
+            
+            should_use_claude_early, strategic_triggers, adjusted_confidence = self.strategic_analyzer.analyze_scene_for_fallback(
+                scene_code, scene_name, fix_count, initial_systematic_result.confidence
+            )
+        
+        # Check if scene should be skipped entirely due to very low confidence
+        min_confidence = 0.4  # Lower threshold with comprehensive validation
+        if adjusted_confidence < min_confidence:
+            logger.warning(f"⏭️ SKIPPING {scene_name} due to very low confidence ({adjusted_confidence:.2f})")
+            return ConversionResult(
+                scene_name=scene_name,
+                success=False,
+                systematic_fixes_applied=[],
+                claude_fixes_applied=[],
+                confidence=adjusted_confidence,
+                conversion_method='skipped_low_confidence',
+                final_code=scene_code,
+                errors=[f"Skipped due to low confidence ({adjusted_confidence:.2f})"],
+                metadata={
+                    'video_name': video_name,
+                    'video_year': video_year,
+                    'strategic_triggers': [t.reason for t in strategic_triggers],
+                    'pre_validation_issues': pre_validation_result.issues if pre_validation_result else [],
+                    'skipped_early': True
+                }
+            )
+        
+        # If strategic analysis suggests Claude, skip systematic and go straight to Claude
+        if should_use_claude_early and self.enable_claude_fallback:
+            logger.info(f"🔄 STRATEGIC EARLY CLAUDE FALLBACK for {scene_name}")
+            claude_result = self._claude_fallback_conversion(
+                scene_code,  # Use original code, not systematic fixes
+                scene_name,
+                [f"strategic_trigger: {t.reason}" for t in strategic_triggers],
+                video_name,
+                video_year
+            )
+            
+            if claude_result.success:
+                logger.info(f"✅ Strategic Claude fallback successful for {scene_name}")
+                self.stats['claude_fallback_success'] += 1
+                return claude_result
+            else:
+                logger.warning(f"⚠️ Strategic Claude fallback failed, trying systematic approach anyway...")
+        
         # Phase 1: Apply systematic fixes
         logger.info("Phase 1: Applying systematic fixes...")
         systematic_result = self.systematic_fixer.fix_code(scene_code)
@@ -174,17 +260,32 @@ class EnhancedSystematicConverter:
         else:
             logger.warning("AST converter not available - skipping ManimGL→ManimCE API conversions")
         
-        # Test if systematic fixes + AST conversion are sufficient
-        # First, always validate the converted code
-        is_valid, validation_errors = self._validate_converted_code(
-            converted_code, scene_name
-        )
+        # Phase 1c: Comprehensive post-conversion validation (NEW)
+        post_validation_result = None
+        if validate_post_conversion:
+            logger.info("Phase 1c: Comprehensive post-conversion validation...")
+            post_validation_result = validate_post_conversion(converted_code, scene_name)
+            
+            if not post_validation_result.is_valid:
+                logger.warning(f"⚠️ Post-conversion validation failed for {scene_name}: {post_validation_result.issues}")
+            
+            # Update confidence based on post-conversion analysis
+            adjusted_confidence = min(adjusted_confidence, post_validation_result.confidence)
+        else:
+            # Fallback to simple validation if comprehensive not available
+            is_valid, validation_errors = self._validate_converted_code(converted_code, scene_name)
+            post_validation_result = type('SimpleResult', (), {
+                'is_valid': is_valid,
+                'confidence': 0.8 if is_valid else 0.3,
+                'issues': validation_errors if not is_valid else [],
+                'should_use_claude': not is_valid
+            })()
         
         # Combine all fixes applied
         all_fixes = systematic_result.fixes_applied + ast_fixes
         
-        # If validation passes, consider systematic fixes sufficient
-        if is_valid:
+        # If post-conversion validation passes with good confidence, consider systematic fixes sufficient
+        if post_validation_result.is_valid and post_validation_result.confidence >= 0.7:
             logger.info(f"✅ Systematic + AST fixes sufficient for {scene_name} (confidence: {systematic_result.confidence:.2f})")
             self.stats['systematic_only_success'] += 1
             
@@ -206,13 +307,15 @@ class EnhancedSystematicConverter:
                     }
                 )
         
-        # Phase 2: Apply validation failure recovery if validation failed
-        if not is_valid and self.validation_recovery:
+        # Phase 2: Apply validation failure recovery if post-conversion validation failed
+        if not post_validation_result.is_valid and self.validation_recovery:
             logger.info("Phase 2: Applying validation failure recovery...")
-            # Apply auto-recovery for validation errors
+            # Apply auto-recovery for post-conversion validation issues
+            error_info = "; ".join(post_validation_result.issues)
+            
             fixed_code, was_fixed, fixes_applied = self.validation_recovery.auto_fix_validation_failure(
                 converted_code,
-                str(validation_errors),  # Convert errors to string
+                error_info,
                 scene_name
             )
             

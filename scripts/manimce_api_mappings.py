@@ -133,7 +133,35 @@ ANIMATION_MAPPINGS: Dict[str, Dict[str, Any]] = {
         },
         'special_handling': 'Convert to LaggedStart with submobject animations',
         'notes': 'Delays animations based on submobject order'
-    }
+    },
+    
+    # NEW: Critical missing animations from 3b1b codebase
+    'FadeToColor': {
+        'new_name': None,
+        'special_handling': 'Use mob.animate.set_color() or custom implementation',
+        'param_mappings': {
+            'color': 'color',
+            'run_time': 'run_time'
+        },
+        'notes': 'Gradual color change animation - very common in 3b1b videos'
+    },
+    'UpdateFromFunc': {
+        'new_name': None,
+        'special_handling': 'Convert to mob.add_updater(lambda m, dt: ...)',
+        'param_mappings': {
+            'func': 'update_function',
+            'suspend_mobject_updating': None
+        },
+        'notes': 'Function-based continuous update - convert to updater pattern'
+    },
+    'MaintainPositionRelativeTo': {
+        'new_name': None,
+        'special_handling': 'Convert to updater that maintains relative position',
+        'param_mappings': {
+            'mobject': 'tracked_mobject'
+        },
+        'notes': 'Keep mobject positioned relative to another'
+    },
 }
 
 # Method to property conversions
@@ -186,6 +214,73 @@ METHOD_TO_PROPERTY_MAPPINGS: Dict[str, Dict[str, Any]] = {
     'get_stroke_width': {
         'property': 'stroke_width',
         'read_only': True
+    },
+    
+    # NEW: Critical missing method mappings from 3b1b codebase
+    'get_top': {
+        'property': 'top',
+        'read_only': True,
+        'notes': 'Boundary point getter - very common'
+    },
+    'get_bottom': {
+        'property': 'bottom',
+        'read_only': True,
+        'notes': 'Boundary point getter'
+    },
+    'get_left': {
+        'property': 'left',
+        'read_only': True,
+        'notes': 'Boundary point getter'
+    },
+    'get_right': {
+        'property': 'right',
+        'read_only': True,
+        'notes': 'Boundary point getter'
+    },
+    'get_corner': {
+        'method': 'get_corner',
+        'notes': 'Still exists in ManimCE'
+    },
+    'get_points': {
+        'property': 'points',
+        'read_only': True,
+        'notes': 'Access underlying point array'
+    },
+    'get_anchors': {
+        'property': 'points',
+        'special_handling': 'Filter for anchor points only',
+        'notes': 'Bezier curve anchor points'
+    },
+    'get_boundary_point': {
+        'method': 'point_from_proportion',
+        'special_handling': 'Use point_from_proportion for parametric boundary',
+        'notes': 'Get point on object boundary'
+    },
+    'sort_points': {
+        'method': None,
+        'special_handling': 'Use custom sorting logic or remove',
+        'notes': 'Common point ordering method - frequently causes errors'
+    },
+    'nudge': {
+        'method': 'shift',
+        'param_mappings': {
+            'scale_factor': 'scale_factor'
+        },
+        'notes': 'Small position adjustment method'
+    },
+    'center_of_mass': {
+        'method': 'get_center_of_mass',
+        'notes': 'Calculate geometric center'
+    },
+    'add_to_back': {
+        'method': 'add',
+        'special_handling': 'Use add() - ManimCE handles z-order differently',
+        'notes': 'Add submobject behind others'
+    },
+    'replace_submobject': {
+        'method': None,
+        'special_handling': 'Use remove() and add() sequence',
+        'notes': 'Replace specific submobject'
     },
     
     # Setters
@@ -466,6 +561,36 @@ CLASS_MAPPINGS: Dict[str, Dict[str, Any]] = {
         'notes': 'SimpleTex is a specialized Tex class - map to MathTex'
     },
     
+    # NEW: Critical missing class mappings from 3b1b codebase
+    'OldTexText': {
+        'new_class': 'Tex',  # LaTeX-based text, not Text
+        'param_mappings': {
+            'arg_separator': None,
+            'tex_to_color_map': None
+        },
+        'special_handling': 'Use raw LaTeX strings with Tex class',
+        'notes': 'Legacy LaTeX text renderer - frequently used in 3b1b videos'
+    },
+    'Point': {
+        'new_class': 'Dot',
+        'special_handling': 'Use Dot with radius=0 for invisible point',
+        'param_mappings': {
+            'location': 'point'
+        },
+        'notes': 'Invisible point object used for positioning'
+    },
+    'ComplexPlane': {
+        'new_class': 'ComplexPlane',
+        'param_mappings': {},
+        'notes': 'Exists in ManimCE but may have different parameters'
+    },
+    'RearrangeEquation': {
+        'new_class': None,
+        'special_handling': 'Create custom implementation using TransformMatchingTex',
+        'required_imports': ['TransformMatchingTex', 'MathTex'],
+        'notes': 'Equation rearrangement helper - very common in math videos'
+    },
+    
     # Pi Creature animations - comment out as no ManimCE equivalent
     'WaveArm': {
         'new_class': None,
@@ -650,6 +775,63 @@ COMPLEX_PATTERNS: Dict[str, Dict[str, Any]] = {
         'pattern': r'def\s+(draw_you|create_pi_creature|make_pi_creature)\s*\(',
         'handler': 'comment_out_pi_creature_functions',
         'description': 'Comment out Pi Creature helper functions'
+    },
+    
+    # NEW: Critical patterns from 3b1b codebase analysis
+    'split_tex_objects': {
+        'pattern': r'\.split\(\)',
+        'handler': 'convert_tex_split_to_submobjects',
+        'description': 'Convert .split() on Tex objects to submobject access'
+    },
+    'point_invisible_objects': {
+        'pattern': r'\bPoint\(',
+        'handler': 'convert_point_to_dot',
+        'description': 'Convert Point() to Dot(radius=0) for invisible points'
+    },
+    'arrow_tail_direction': {
+        'pattern': r'Arrow\([^)]*(?:tail\s*=|direction\s*=)',
+        'handler': 'convert_arrow_tail_direction',
+        'description': 'Convert tail/direction to start/end parameters'
+    },
+    'delay_by_order_patterns': {
+        'pattern': r'DelayByOrder\(',
+        'handler': 'convert_delay_by_order_to_lagged_start',
+        'description': 'Convert DelayByOrder to LaggedStart with submobject animations'
+    },
+    'fade_to_color_patterns': {
+        'pattern': r'FadeToColor\(',
+        'handler': 'convert_fade_to_color_to_animate',
+        'description': 'Convert FadeToColor to mob.animate.set_color()'
+    },
+    'updater_from_func_patterns': {
+        'pattern': r'UpdateFromFunc\(',
+        'handler': 'convert_update_from_func_to_updater',
+        'description': 'Convert UpdateFromFunc to mob.add_updater() pattern'
+    },
+    'maintain_position_patterns': {
+        'pattern': r'MaintainPositionRelativeTo\(',
+        'handler': 'convert_maintain_position_to_updater',
+        'description': 'Convert MaintainPositionRelativeTo to relative position updater'
+    },
+    'sort_points_removal': {
+        'pattern': r'\.sort_points\(\)',
+        'handler': 'comment_out_sort_points',
+        'description': 'Comment out sort_points() calls - not available in ManimCE'
+    },
+    'rearrange_equation_patterns': {
+        'pattern': r'RearrangeEquation\.',
+        'handler': 'convert_rearrange_equation_to_transform_matching_tex',
+        'description': 'Convert RearrangeEquation to TransformMatchingTex implementation'
+    },
+    'old_tex_text_usage': {
+        'pattern': r'OldTexText\(',
+        'handler': 'convert_old_tex_text_to_tex',
+        'description': 'Convert OldTexText to Tex with proper LaTeX handling'
+    },
+    'boundary_point_getters': {
+        'pattern': r'\.get_(top|bottom|left|right)\(\)',
+        'handler': 'convert_boundary_getters_to_properties',
+        'description': 'Convert get_*() boundary methods to properties'
     }
 }
 

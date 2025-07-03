@@ -146,6 +146,22 @@ class UnfixablePatternDetector:
                 category="complex_3d",
                 level=FixabilityLevel.LIKELY_UNFIXABLE,
                 explanation="Complex 3D camera configurations may not translate to ManimCE"
+            ),
+            
+            # Interactive Mouse/Keyboard Scenes (Definitely Unfixable)
+            UnfixablePattern(
+                pattern=r'on_mouse_motion|on_mouse_press|on_key_press|mouse_drag_point|InteractiveScene',
+                category="interactive_scene",
+                level=FixabilityLevel.DEFINITELY_UNFIXABLE,
+                explanation="Interactive scenes require live OpenGL window and cannot be pre-rendered as videos"
+            ),
+            
+            # Direct OpenGL Access (Definitely Unfixable)
+            UnfixablePattern(
+                pattern=r'moderngl\.|TRIANGLE_STRIP|direct.*opengl',
+                category="direct_opengl",
+                level=FixabilityLevel.DEFINITELY_UNFIXABLE,
+                explanation="Direct OpenGL calls are not supported in ManimCE"
             )
         ]
     

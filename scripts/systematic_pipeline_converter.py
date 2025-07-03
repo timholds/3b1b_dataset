@@ -1289,8 +1289,9 @@ def _print_systematic_conversion_summary(results: Dict, converter: EnhancedSyste
         if results.get('skipped_low_confidence', 0) > 0:
             skipped_count = results['skipped_low_confidence']
             estimated_savings = skipped_count * 0.03  # Estimate $0.03 per Claude API call
+            min_confidence = getattr(builder, 'min_conversion_confidence', 0.8)
             stats["Confidence Threshold"] = {
-                "Threshold": f"{min_conversion_confidence:.1%}",
+                "Threshold": f"{min_confidence:.1%}",
                 "Scenes skipped": skipped_count,
                 "Estimated cost savings": f"${estimated_savings:.2f}",
                 "Time saved": f"~{skipped_count * 30}s"  # Estimate 30s per Claude call
@@ -1321,7 +1322,8 @@ def _print_systematic_conversion_summary(results: Dict, converter: EnhancedSyste
         if results.get('skipped_low_confidence', 0) > 0:
             skipped_count = results['skipped_low_confidence']
             estimated_savings = skipped_count * 0.03
-            print(f"⏭️  Skipped: {skipped_count} scenes (confidence < {min_conversion_confidence:.1%}) - saved ~${estimated_savings:.2f}")
+            min_confidence = getattr(builder, 'min_conversion_confidence', 0.8)
+            print(f"⏭️  Skipped: {skipped_count} scenes (confidence < {min_confidence:.1%}) - saved ~${estimated_savings:.2f}")
         print(f"⏱️  Time: {results['processing_time']:.1f}s")
         print("="*60)
 

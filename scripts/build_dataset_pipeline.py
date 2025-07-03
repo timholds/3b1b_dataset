@@ -71,7 +71,7 @@ class DatasetPipelineBuilder:
                  cleaning_mode: str = 'hybrid', conversion_mode: str = 'scene',
                  parallel_render_workers: int = 1, use_systematic_converter: bool = True,
                  enable_unfixable_skipping: bool = True, monitor_unfixable_only: bool = False,
-                 min_conversion_confidence: float = 0.8):
+                 min_conversion_confidence: float = 0.65):
         self.base_dir = Path(base_dir)
         self.output_dir = self.base_dir / 'outputs'
         self.verbose = verbose

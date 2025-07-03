@@ -11,4 +11,5 @@ Generate self-contained ManimCE code snippets (one scene per file) from 3Blue1Br
 - We will render the converted scenes into videos to manually inspect and compare them against the original videos
 - The goal is to achieve an exact match, with minor exceptions like Pi Creatures
 
-[Rest of the existing content remains unchanged]
+## 🛠 Development Principles
+- When fixing the pipeline, do not sidetracked into trying to patch symptoms instead of fixing the root cause in the pipeline

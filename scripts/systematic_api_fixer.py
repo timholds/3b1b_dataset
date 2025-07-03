@@ -118,6 +118,46 @@ PROPERTY_CONVERSIONS = {
     'get_boundary': 'get_boundary',  # Still a method in ManimCE
 }
 
+# Missing API mappings from error logs (identified in issue analysis)
+MISSING_API_MAPPINGS = {
+    # NumberLine method mappings - CRITICAL
+    'sort_points': None,  # Most common cause of errors - comment out or remove
+    
+    # Boundary point getters - VERY COMMON
+    'get_top': 'top',
+    'get_bottom': 'bottom', 
+    'get_left': 'left',
+    'get_right': 'right',
+    'get_corner': 'get_corner',  # Still exists
+    
+    # Point manipulation - FREQUENT
+    'nudge': 'shift',
+    'center_of_mass': 'get_center_of_mass',
+    'add_to_back': 'add',
+    'get_points': 'points',
+    'get_anchors': 'points',  # Filter for anchors
+    'get_boundary_point': 'point_from_proportion',
+    
+    # Color gradient mappings  
+    'range_to': 'interpolate_color',  # Color('yellow').range_to('red', 4) → needs manual conversion
+    
+    # Animation mappings from error logs
+    'LaggedStart': 'LaggedStart',  # Actually exists in ManimCE, just needs correct import
+    'ApplyFunction': 'Transform',  # Closest equivalent
+    'ApplyPointwiseFunction': 'Transform',  # Closest equivalent
+    'Succession': 'Succession',  # Exists in ManimCE
+    'AnimationGroup': 'AnimationGroup',  # Exists in ManimCE
+    'DelayByOrder': 'LaggedStart',  # Very common - delays by submobject order
+    'FadeToColor': None,  # Convert to mob.animate.set_color()
+    'UpdateFromFunc': None,  # Convert to mob.add_updater()
+    'MaintainPositionRelativeTo': None,  # Convert to updater
+    
+    # Rate functions - COMMON
+    'smooth': 'rate_functions.smooth',
+    'there_and_back': 'rate_functions.there_and_back',
+    'squish_rate_func': 'rate_functions.squish_rate_func',
+}
+
 # Class parameter fixes
 PARAMETER_FIXES = {
     'ImageMobject': {
@@ -223,6 +263,10 @@ class SystematicAPIFixer:
         # Phase 12: Handle custom scene base classes (CycloidScene, etc.)
         fixed_code, scene_fixes = self._fix_custom_scene_classes(fixed_code)
         fixes_applied.extend(scene_fixes)
+        
+        # Phase 13: Apply missing API mappings from error logs
+        fixed_code, api_fixes = self._fix_missing_api_mappings(fixed_code)
+        fixes_applied.extend(api_fixes)
         
         # Validate syntax
         syntax_valid, syntax_issues = self._validate_syntax(fixed_code)
@@ -753,6 +797,87 @@ class SystematicAPIFixer:
             fixed_lines.append(fixed_line)
         
         return '\n'.join(fixed_lines), fixes
+    
+    def _fix_missing_api_mappings(self, code: str) -> Tuple[str, List[str]]:
+        """Apply missing API mappings identified from error logs."""
+        fixes = []
+        fixed_code = code
+        
+        for old_api, new_api in MISSING_API_MAPPINGS.items():
+            # Handle method calls specifically
+            if old_api == 'sort_points':
+                # Most common error - comment out sort_points() calls
+                pattern = rf'\.{old_api}\(\)'
+                if re.search(pattern, fixed_code):
+                    def comment_sort_points(match):
+                        return f'# {match.group(0)}  # REMOVED: sort_points() not available in ManimCE'
+                    fixed_code = re.sub(pattern, comment_sort_points, fixed_code)
+                    fixes.append(f'Commented out .{old_api}() - not available in ManimCE')
+            
+            elif old_api in ['get_top', 'get_bottom', 'get_left', 'get_right']:
+                # Convert get_*() to property access
+                pattern = rf'\.{old_api}\(\)'
+                if re.search(pattern, fixed_code):
+                    fixed_code = re.sub(pattern, f'.{new_api}', fixed_code)
+                    fixes.append(f'Converted .{old_api}() to .{new_api} property')
+            
+            elif old_api in ['get_points', 'get_anchors']:
+                # Convert get_*() to property access
+                pattern = rf'\.{old_api}\(\)'
+                if re.search(pattern, fixed_code):
+                    fixed_code = re.sub(pattern, f'.{new_api}', fixed_code)
+                    fixes.append(f'Converted .{old_api}() to .{new_api} property')
+            
+            elif old_api == 'nudge':
+                # Convert nudge() to shift()
+                pattern = rf'\.{old_api}\('
+                if re.search(pattern, fixed_code):
+                    fixed_code = re.sub(pattern, f'.{new_api}(', fixed_code)
+                    fixes.append(f'Converted .{old_api}() to .{new_api}()')
+            
+            elif old_api in ['FadeToColor', 'UpdateFromFunc', 'MaintainPositionRelativeTo']:
+                # Comment out complex animations that need manual conversion
+                if old_api in fixed_code:
+                    pattern = rf'\b{old_api}\b'
+                    def comment_complex_anim(match):
+                        return f'# {match.group(0)}  # MANUAL: Complex animation - needs custom implementation'
+                    fixed_code = re.sub(pattern, comment_complex_anim, fixed_code)
+                    fixes.append(f'Commented out {old_api} - needs manual conversion')
+                    
+            elif old_api.startswith('rate_functions.'):
+                # Rate functions need import prefix
+                base_func = old_api.split('.')[-1]
+                if base_func in fixed_code:
+                    pattern = rf'\b{base_func}\b'
+                    fixed_code = re.sub(pattern, old_api, fixed_code)
+                    fixes.append(f'Added rate_functions prefix to {base_func}')
+            
+            elif old_api == 'range_to':
+                # Color('yellow').range_to('red', 4) needs special handling
+                # For now, comment out - this needs manual conversion to gradient
+                pattern = rf'\.{old_api}\([^)]*\)'
+                if re.search(pattern, fixed_code):
+                    def comment_range_to(match):
+                        return f'# {match.group(0)}  # MANUAL: Convert to gradient() function'
+                    fixed_code = re.sub(pattern, comment_range_to, fixed_code)
+                    fixes.append(f'Commented out .{old_api}() - needs manual conversion to gradient()')
+            
+            elif new_api and old_api in fixed_code:
+                # Simple replacements for animations/methods that exist in ManimCE
+                if old_api == new_api:
+                    # Just add a comment to remind about import
+                    if old_api in fixed_code and 'from manim import' in fixed_code:
+                        # Assume it's imported correctly
+                        pass
+                    else:
+                        fixes.append(f'Noted {old_api} usage - ensure it\'s imported from manim')
+                else:
+                    # Replace with equivalent
+                    pattern = rf'\b{old_api}\b'
+                    fixed_code = re.sub(pattern, new_api, fixed_code)
+                    fixes.append(f'Converted {old_api} to {new_api}')
+        
+        return fixed_code, fixes
     
     def _calculate_confidence(self, fixes_applied: List[str], remaining_issues: List[str]) -> float:
         """Calculate confidence score for conversion success."""
